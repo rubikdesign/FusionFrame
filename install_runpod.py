@@ -44,18 +44,18 @@ APP_DIR = INSTALL_DIR / "app"
 CACHE_DIR = INSTALL_DIR / "cache"
 LOG_DIR = INSTALL_DIR / "logs"
 MODEL_DIR = INSTALL_DIR / "models"
+# Pinned, compatible versions to avoid import errors
 REQUIRED_PACKAGES = [
     "torch", "torchvision", "torchaudio",
-    "diffusers==0.22.1", "transformers", "accelerate", "safetensors",
+    "diffusers==0.21.0", "huggingface_hub==0.14.1", "transformers==4.33.0", "accelerate", "safetensors",
     "gradio", "numpy", "pillow", "opencv-python", "tqdm", "requests",
     "controlnet-aux", "timm", "mediapipe"
 ]
 
+# Helper to run shell commands
 def run_command(command, desc=None, check=True, shell=False):
-    """Execute a command and log output"""
     if desc:
         logger.info(f"🔄 {desc}...")
-
     cmd_list = command if shell else command.split()
     try:
         process = subprocess.run(
@@ -77,23 +77,21 @@ def run_command(command, desc=None, check=True, shell=False):
             return None
         sys.exit(1)
 
+# Create necessary directories
 def setup_directories():
-    """Create required directories"""
     logger.info("🔄 Creating necessary directories...")
-    for dir_path in [APP_DIR, CACHE_DIR, LOG_DIR, MODEL_DIR]:
-        dir_path.mkdir(parents=True, exist_ok=True)
-        logger.info(f"✅ Created directory: {dir_path}")
+    for d in [APP_DIR, CACHE_DIR, LOG_DIR, MODEL_DIR]:
+        d.mkdir(parents=True, exist_ok=True)
+        logger.info(f"✅ Created directory: {d}")
 
+# Check for GPU and CUDA
 def check_gpu():
-    """Check CUDA and GPU availability"""
     logger.info("🔄 Checking GPU availability...")
     try:
-        nvidia_smi = run_command("nvidia-smi", desc="Running nvidia-smi", check=False)
-        if nvidia_smi and nvidia_smi.returncode == 0:
+        proc = run_command("nvidia-smi", desc="Running nvidia-smi", check=False)
+        if proc and proc.returncode == 0:
             logger.info("✅ GPU detected. Checking CUDA compatibility...")
-
-            # Small script to check CUDA with PyTorch
-            check_script = """
+            script = """
 import torch
 if torch.cuda.is_available():
     print(f"CUDA available: {torch.cuda.get_device_name(0)}")
@@ -103,54 +101,44 @@ else:
     print("CUDA not available")
     exit(1)
 """
-            with open(INSTALL_DIR / "check_cuda.py", "w") as f:
-                f.write(check_script)
-
+            (INSTALL_DIR / "check_cuda.py").write_text(script)
             return True
         else:
-            logger.warning("⚠️ No GPU detected. The application will run in CPU mode (very slow).")
+            logger.warning("⚠️ No GPU detected. Running in CPU mode.")
             return False
     except Exception as e:
         logger.warning(f"⚠️ Could not check GPU: {e}")
         return False
 
+# Install PyTorch with specified CUDA
 def install_pytorch(cuda_version):
-    """Install PyTorch with the specified CUDA version"""
-    cuda_url = f"https://download.pytorch.org/whl/cu{cuda_version}"
+    url = f"https://download.pytorch.org/whl/cu{cuda_version}"
     logger.info(f"🔄 Installing PyTorch with CUDA {cuda_version} support...")
-
-    command = f"pip install torch torchvision torchaudio --extra-index-url {cuda_url}"
-    run_command(command, desc="Installing PyTorch", shell=True)
-
-    # Verify installation
-    if os.path.exists(INSTALL_DIR / "check_cuda.py"):
-        cuda_check = run_command(f"python {INSTALL_DIR / 'check_cuda.py'}", desc="Verifying CUDA in PyTorch", check=False, shell=True)
-        if cuda_check and cuda_check.returncode == 0:
+    run_command(f"pip install torch torchvision torchaudio --extra-index-url {url}", desc="Installing PyTorch", shell=True)
+    if (INSTALL_DIR / "check_cuda.py").exists():
+        chk = run_command(f"python {INSTALL_DIR / 'check_cuda.py'}", desc="Verifying CUDA in PyTorch", check=False, shell=True)
+        if chk and chk.returncode == 0:
             logger.info("✅ PyTorch with CUDA installed successfully")
         else:
             logger.warning("⚠️ PyTorch installed, but CUDA check failed.")
 
+# Install all dependencies, including pinned versions
 def install_dependencies():
-    """Install all required Python packages"""
     logger.info("🔄 Installing Python dependencies...")
-
-    packages = " ".join(REQUIRED_PACKAGES)
-    run_command(f"pip install {packages}", desc="Installing core packages", shell=True)
-
+    pkgs = " ".join(REQUIRED_PACKAGES)
+    run_command(f"pip install {pkgs}", desc="Installing core packages", shell=True)
     logger.info("🔄 Installing IP-Adapter...")
     run_command("pip install git+https://github.com/tencent-ailab/IP-Adapter.git", desc="Installing IP-Adapter", shell=True)
-
     if not args.no_xformers:
         logger.info("🔄 Installing xformers for optimization...")
         run_command("pip install xformers", desc="Installing xformers", shell=True)
-
     logger.info("🔄 Installing bitsandbytes for memory optimization...")
     run_command("pip install bitsandbytes", desc="Installing bitsandbytes", shell=True)
 
+# Main installation flow
 def main():
-    """Main installation function"""
-    start_time = time.time()
-    logger.info(f"🚀 Starting FusionFrame installation")
+    start = time.time()
+    logger.info("🚀 Starting FusionFrame installation")
     logger.info(f"📂 Installation directory: {INSTALL_DIR}")
 
     setup_directories()
@@ -158,15 +146,15 @@ def main():
     install_pytorch(args.cuda_version)
     install_dependencies()
 
-    elapsed_time = time.time() - start_time
-    logger.info(f"✨ Installation completed in {elapsed_time:.1f} seconds!")
-    logger.info(f"📋 Summary:")
+    elapsed = time.time() - start
+    logger.info(f"✨ Installation completed in {elapsed:.1f} seconds!")
+    logger.info("📋 Summary:")
     logger.info(f"   - Installation Directory: {INSTALL_DIR}")
     logger.info(f"   - Cache Directory: {CACHE_DIR}")
     logger.info(f"   - To start the application: {INSTALL_DIR}/start.sh")
-    logger.info(f"   - Web UI will be available at: http://localhost:{args.port}")
+    logger.info(f"   - Web UI at: http://localhost:{args.port}")
     if args.shared:
-        logger.info(f"   - Public share link will be displayed on startup")
+        logger.info("   - Public share link will be displayed on startup")
 
 if __name__ == "__main__":
     try:
@@ -176,6 +164,5 @@ if __name__ == "__main__":
         sys.exit(1)
     except Exception as e:
         logger.error(f"❌ Installation error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        import traceback; traceback.print_exc()
         sys.exit(1)
