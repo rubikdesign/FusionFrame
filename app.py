@@ -1455,6 +1455,16 @@ def create_interface():
 # Function to download and preload models for testing
 def download_test_model():
     """Download a small test model for initial setup verification"""
+    # Verifică dacă modelul există deja
+    test_model_path = os.path.join(MODELS_DIR, "test_model")
+    if os.path.exists(test_model_path) and os.listdir(test_model_path):
+        logger.info("Model deja downloadat. Sărim peste download.")
+        return {
+            "model_path": test_model_path,
+            "test_image_path": os.path.join(OUTPUT_DIR, "test_model_generation.png"),
+            "success": True
+        }
+    
     try:
         # Select a small, lightweight model for testing
         test_model_id = "runwayml/stable-diffusion-v1-5"
@@ -1533,4 +1543,23 @@ def main_test_model_download():
         print(f"Error: {result.get('error', 'Unknown error')}")
 
 if __name__ == "__main__":
-    main_test_model_download()
+    # Parsare argumente pentru port și share
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="FusionFrame App")
+    parser.add_argument("--port", type=int, default=7860, help="Port pentru interfața web")
+    parser.add_argument("--share", action="store_true", help="Permite share public")
+    args = parser.parse_args()
+
+    # Creează și lansează interfața
+    try:
+        app = create_interface()
+        app.launch(
+            server_name='0.0.0.0', 
+            port=args.port, 
+            share=args.share
+        )
+    except Exception as e:
+        logger.error(f"Eroare la lansarea aplicației: {e}")
+        import traceback
+        traceback.print_exc()
