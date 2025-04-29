@@ -688,36 +688,22 @@ def load_lora_weights(pipe, lora_file_path, lora_weight=0.7):
     
     return pipe
 
-def prepare_image(image_path, target_size=(768, 768)):
-    """Load and prepare image for processing"""
-    if image_path is None:
+def prepare_image(img: Optional[Image.Image], target_size=(768,768)):
+    if img is None:
         return None
-    
-    try:
-        # Open the image file
-        image = Image.open(image_path)
-        
-        # Convert RGBA to RGB if needed
-        if image.mode == 'RGBA':
-            # Create a white background
-            background = Image.new('RGB', image.size, (255, 255, 255))
-            # Paste the image using itself as mask
-            background.paste(image, (0, 0), image)
-            image = background
-        
-        # Resize to target size while preserving aspect ratio
-        image.thumbnail(target_size, Image.Resampling.LANCZOS)
-        
-        # Create a new image with the target size and paste the resized image centered
-        new_image = Image.new('RGB', target_size, (255, 255, 255))
-        offset = ((target_size[0] - image.width) // 2, (target_size[1] - image.height) // 2)
-        new_image.paste(image, offset)  # Această linie trebuie să fie corect indentată
-        
-        return new_image
-    
-    except Exception as e:
-        logger.error(f"Error preparing image: {e}")
-        return None
+    # Ensure RGB
+    if img.mode == "RGBA":
+        bg = Image.new("RGB", img.size, (255,255,255))
+        bg.paste(img, mask=img)
+        img = bg
+    # Resize while keeping aspect
+    img.thumbnail(target_size, Image.Resampling.LANCZOS)
+    # Center on white canvas
+    canvas = Image.new("RGB", target_size, (255,255,255))
+    offset = ((target_size[0] - img.width)//2, (target_size[1] - img.height)//2)
+    canvas.paste(img, offset)
+    return canvas
+
 
 def generate_controlnet_conditioning(image, controlnet_type, progress=None):
     """Generate conditioning image for ControlNet"""
@@ -1129,9 +1115,9 @@ def create_interface():
                 with gr.Column(scale=1):
                     gr.Markdown("### 📸 1. Încărcare Imagini")
                     
-                    woman_image = gr.File(label="Imagine Model", file_types=["image"])
-                    clothing_image = gr.File(label="Imagine Îmbrăcăminte (Opțional)", file_types=["image"])
-                    background_image = gr.File(label="Imagine Fundal (Opțional)", file_types=["image"])
+                    woman_image    = gr.Image(type="pil", label="Imagine Model")
+                    clothing_image = gr.Image(type="pil", label="Imagine Îmbrăcăminte (Opțional)")
+                    background_image = gr.Image(type="pil", label="Imagine Fundal (Opțional)")
                     
                     gr.Markdown("### 🧩 2. LoRA Management")
                     lora_upload = gr.File(label="Încarcă Fișier LoRA (.safetensors)", file_types=[".safetensors"])
@@ -1354,9 +1340,9 @@ def create_interface():
             refresh_models_btn.click(list_downloaded_models, inputs=None, outputs=[downloaded_models])
         
         # Set up event handlers
-        woman_image.change(save_uploaded_file, inputs=[woman_image], outputs=[woman_image])
-        clothing_image.change(save_uploaded_file, inputs=[clothing_image], outputs=[clothing_image])
-        background_image.change(save_uploaded_file, inputs=[background_image], outputs=[background_image])
+        # woman_image.change(save_uploaded_file, inputs=[woman_image], outputs=[woman_image])
+        # clothing_image.change(save_uploaded_file, inputs=[clothing_image], outputs=[clothing_image])
+        # background_image.change(save_uploaded_file, inputs=[background_image], outputs=[background_image])
         
         # LoRA uploads should update all LoRA dropdowns
         lora_upload.change(
