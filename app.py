@@ -15,7 +15,10 @@ from typing import List, Dict, Tuple, Optional, Union, Any
 import logging
 
 # Set up basic logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Check if CUDA is available
@@ -25,49 +28,38 @@ if torch.cuda.is_available():
 else:
     logger.warning("CUDA not available. Performance will be severely limited.")
 
-# Diffusers and related imports
+# --- AI framework imports (must match installer pins) ---
 try:
     from diffusers import (
-        StableDiffusionXLPipeline, StableDiffusionPipeline, 
-        StableDiffusionXLImg2ImgPipeline, StableDiffusionImg2ImgPipeline,
-        StableDiffusionXLControlNetPipeline, StableDiffusionControlNetPipeline,
-        DDIMScheduler, EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler,
-        AutoencoderKL, ControlNetModel, UNet2DConditionModel
+        StableDiffusionXLPipeline,
+        StableDiffusionPipeline,
+        StableDiffusionXLControlNetPipeline,
+        StableDiffusionControlNetPipeline,
+        DDIMScheduler,
+        EulerAncestralDiscreteScheduler,
+        DPMSolverMultistepScheduler,
+        AutoencoderKL,
+        ControlNetModel,
+        UNet2DConditionModel
     )
     from diffusers.pipelines.controlnet import MultiControlNetModel
-    from diffusers.utils import load_image
-    from transformers import CLIPImageProcessor, AutoProcessor, CLIPVisionModelWithProjection
+    from transformers import (
+        CLIPImageProcessor,
+        AutoProcessor,
+        CLIPVisionModelWithProjection
+    )
 except ImportError:
-    logger.error("Required packages not found. Installing dependencies...")
-    # Auto-install required packages
-    os.system("pip install diffusers==0.22.1 transformers accelerate safetensors controlnet-aux timm mediapipe")
-    os.system("pip install git+https://github.com/huggingface/diffusers.git@main")
-    os.system("pip install ip-adapter")
-    # Retry imports
-    from diffusers import (
-        StableDiffusionXLPipeline, StableDiffusionPipeline, 
-        StableDiffusionXLImg2ImgPipeline, StableDiffusionImg2ImgPipeline,
-        StableDiffusionXLControlNetPipeline, StableDiffusionControlNetPipeline,
-        DDIMScheduler, EulerAncestralDiscreteScheduler, DPMSolverMultistepScheduler,
-        AutoencoderKL, ControlNetModel
-    )
-    from diffusers.pipelines.controlnet import MultiControlNetModel
-    from diffusers.utils import load_image
-    from transformers import CLIPImageProcessor, AutoProcessor, CLIPVisionModelWithProjection
+    logger.error("Missing required AI dependencies. Please run install_runpod.py first.")
+    sys.exit(1)
+# --------------------------------------------------------
 
 # Try to import IP-Adapter
 try:
     from ip_adapter import IPAdapterPlus, IPAdapterPlusXL
     IP_ADAPTER_AVAILABLE = True
 except ImportError:
-    logger.warning("IP-Adapter not available. Installing...")
-    os.system("pip install git+https://github.com/tencent-ailab/IP-Adapter.git")
-    try:
-        from ip_adapter import IPAdapterPlus, IPAdapterPlusXL
-        IP_ADAPTER_AVAILABLE = True
-    except ImportError:
-        logger.error("Could not install IP-Adapter. Some features will be disabled.")
-        IP_ADAPTER_AVAILABLE = False
+    logger.warning("IP-Adapter not available. Some features will be disabled.")
+    IP_ADAPTER_AVAILABLE = False
 
 # Try to import ControlNet preprocessors
 try:
@@ -75,16 +67,8 @@ try:
     import cv2
     CONTROLNET_AUX_AVAILABLE = True
 except ImportError:
-    logger.warning("ControlNet auxiliary modules not available. Installing...")
-    os.system("pip install controlnet_aux")
-    try:
-        from controlnet_aux import OpenposeDetector, HEDdetector, MidasDetector, LineartDetector
-        import cv2
-        CONTROLNET_AUX_AVAILABLE = True
-    except ImportError:
-        logger.error("Could not install ControlNet auxiliary modules. Some features will be disabled.")
-        CONTROLNET_AUX_AVAILABLE = False
-
+    logger.warning("ControlNet auxiliary modules not available. Some features will be disabled.")
+    CONTROLNET_AUX_AVAILABLE = False
 # Configuration
 CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "clothing_app")
 LORA_DIR = os.path.join(CACHE_DIR, "loras")
