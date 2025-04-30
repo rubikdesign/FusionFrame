@@ -19,85 +19,106 @@ import logging
 import tempfile
 import argparse
 
-def patch_ip_adapter():
+# 1)  adaugă folderul aplicaţiei în sys.path
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+if APP_DIR not in sys.path:
+    sys.path.insert(0, APP_DIR)
+
+# 2)  după ce ai făcut patch-ul IP-Adapter, poţi importa extensia
+try:
+    from ip_adapter_multi import IPAdapterMulti
+  
+except ImportError as e:
+    logging.error(
+        "⚠️  ip_adapter_multi nu poate fi importat: %s\n"
+        "Verifică dacă fişierul este în acelaşi director cu app.py "
+        "sau dacă APP_DIR e în sys.path.",
+        e,
+    )
+    # IPAdapterMulti = IPAdapterMultiXL = None
+
+# --------------------------------------------------------------------
+#  IP-ADAPTER  –  monkey-patch pt. a NU mai arunca NoneType error
+#                 (asigură întotdeauna un parametru „image” valid)
+# --------------------------------------------------------------------
+def patch_ip_adapter() -> bool:
     """
-    Apply a monkey patch to fix IP-Adapter's image handling
-    This ensures the image is properly passed to the pipeline
+    Monkey-patch IP-Adapter pentru a evita eroarea „image is None”.
+
+    – Dacă pipeline-ul are ControlNet şi lipseşte parametrul `image`,
+      se injectează un canvas RGB 768×768 + `controlnet_conditioning_scale = 0.0`
+    – Funcţionează pentru:
+        • IPAdapterPlus          • IPAdapterPlusXL
+        # • IPAdapterMulti         • IPAdapterMultiXL
+    Returnează True la succes.
     """
     try:
-        import ip_adapter.ip_adapter
-        
-        # Store the original generate method
-        original_generate = ip_adapter.ip_adapter.IPAdapterPlus.generate
-        original_generate_xl = ip_adapter.ip_adapter.IPAdapterPlusXL.generate
-        
-        # Define a patched generate method
-        def patched_generate(self, pil_image, *args, **kwargs):
-            """Patched version of generate that ensures proper image handling"""
-            try:
-                # Log detailed information about the image
-                logger.info(f"IP-Adapter patched_generate: image type={type(pil_image)}, "
-                           f"image size={getattr(pil_image, 'size', 'unknown')}")
-                
-                # Ensure pipeline has the required parameters
-                if hasattr(self.pipe, "controlnet") and not "image" in kwargs:
-                    # For ControlNet pipelines, we need to provide a dummy image
-                    logger.info("Adding dummy image for ControlNet pipeline")
-                    if isinstance(self.pipe, StableDiffusionXLControlNetPipeline) or \
-                       isinstance(self.pipe, StableDiffusionControlNetPipeline):
-                        # Create a white dummy image
-                        dummy_img = Image.new("RGB", (768, 768), (255, 255, 255))
-                        kwargs["image"] = [dummy_img]
-                        kwargs["controlnet_conditioning_scale"] = 0.0
-                        logger.info("Added dummy image for ControlNet")
-                
-                # Call the original method with fixed parameters
-                return original_generate(self, pil_image, *args, **kwargs)
-            except Exception as e:
-                logger.error(f"Error in patched_generate: {e}")
-                import traceback
-                traceback.print_exc()
-                raise
-        
-        # Define a patched generate method for SDXL
-        def patched_generate_xl(self, pil_image, *args, **kwargs):
-            """Patched version of generate for SDXL that ensures proper image handling"""
-            try:
-                # Log detailed information about the image
-                logger.info(f"IP-Adapter XL patched_generate: image type={type(pil_image)}, "
-                           f"image size={getattr(pil_image, 'size', 'unknown')}")
-                
-                # Ensure pipeline has the required parameters
-                if hasattr(self.pipe, "controlnet") and not "image" in kwargs:
-                    # For ControlNet pipelines, we need to provide a dummy image
-                    logger.info("Adding dummy image for ControlNet XL pipeline")
-                    if isinstance(self.pipe, StableDiffusionXLControlNetPipeline) or \
-                       isinstance(self.pipe, StableDiffusionControlNetPipeline):
-                        # Create a white dummy image
-                        dummy_img = Image.new("RGB", (768, 768), (255, 255, 255))
-                        kwargs["image"] = [dummy_img]
-                        kwargs["controlnet_conditioning_scale"] = 0.0
-                        logger.info("Added dummy image for ControlNet XL")
-                
-                # Call the original method with fixed parameters
-                return original_generate_xl(self, pil_image, *args, **kwargs)
-            except Exception as e:
-                logger.error(f"Error in patched_generate_xl: {e}")
-                import traceback
-                traceback.print_exc()
-                raise
-        
-        # Apply the patch
-        ip_adapter.ip_adapter.IPAdapterPlus.generate = patched_generate
-        ip_adapter.ip_adapter.IPAdapterPlusXL.generate = patched_generate_xl
-        
-        logger.info("Successfully applied IP-Adapter patch")
+        import ip_adapter.ip_adapter as ipa
+        from PIL import Image
+        from diffusers import (
+            StableDiffusionControlNetPipeline,
+            StableDiffusionXLControlNetPipeline,
+        )
+
+        # ───────────────── helpers ────────────────────────────────────
+        def _add_dummy_if_needed(pipe, kwargs):
+            """Dacă există ControlNet dar lipseşte `image`, injectează dummy."""
+            if (
+                "image" not in kwargs
+                and getattr(pipe, "controlnet", None) is not None
+                and isinstance(
+                    pipe,
+                    (
+                        StableDiffusionControlNetPipeline,
+                        StableDiffusionXLControlNetPipeline,
+                    ),
+                )
+            ):
+                kwargs["image"] = [Image.new("RGB", (768, 768), (255, 255, 255))]
+                kwargs.setdefault("controlnet_conditioning_scale", 0.0)
+                logger.debug("Injected dummy image for ControlNet fallback")
+
+        # —— wrap pentru generate (single-ref) ————————————————
+        def _wrap_single(original_fn):
+            def wrapper(self, pil_image, *args, **kwargs):
+                logger.info(
+                    f"IP-Adapter SINGLE  | ref={getattr(pil_image,'size',None)} "
+                    f"| pipe={type(self.pipe).__name__}"
+                )
+                _add_dummy_if_needed(self.pipe, kwargs)
+                return original_fn(self, pil_image, *args, **kwargs)
+            return wrapper
+
+        # —— wrap pentru generate_multi (multi-ref) ————————————
+        def _wrap_multi(original_fn):
+            def wrapper(self, ref_images=None, *args, **kwargs):
+                logger.info(
+                    f"IP-Adapter MULTI   | refs={len(ref_images or [])} "
+                    f"| pipe={type(self.pipe).__name__}"
+                )
+                _add_dummy_if_needed(self.pipe, kwargs)
+                # majoritatea implementărilor folosesc arg.-cheie `ref_images`;
+                # trimitem explicit pentru siguranţă
+                return original_fn(self, ref_images=ref_images, *args, **kwargs)
+            return wrapper
+
+        # ───────────────── aplicăm patch-ul ──────────────────────────
+        ipa.IPAdapterPlus.generate     = _wrap_single(ipa.IPAdapterPlus.generate)
+        ipa.IPAdapterPlusXL.generate   = _wrap_single(ipa.IPAdapterPlusXL.generate)
+
+        if hasattr(ipa, "IPAdapterMulti"):
+            ipa.IPAdapterMulti.generate   = _wrap_multi(ipa.IPAdapterMulti.generate)
+        # if hasattr(ipa, "IPAdapterMultiXL"):
+        #     ipa.IPAdapterMultiXL.generate = _wrap_multi(ipa.IPAdapterMultiXL.generate)
+
+        logger.info("✅  IP-Adapter monkey-patch applied successfully")
         return True
+
     except Exception as e:
-        logger.error(f"Failed to apply IP-Adapter patch: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"❌  Could not patch IP-Adapter: {e}", exc_info=True)
         return False
+
+
 
 # Set up basic logging with more detailed format
 logging.basicConfig(
@@ -332,6 +353,14 @@ IP_ADAPTER_MODELS = {
         "subfolder": "models",
         "weight_name": "ip-adapter-plus-face_sd15.bin"
     },
+
+    "IP-Adapter Multi (SDXL)": {
+        "model_id":  "h94/IP-Adapter",
+        "subfolder": "sdxl_models",
+        "weight_name": "ip-adapter-plus_sdxl_vit-h.bin",   # acelaşi ckpt
+        "multi": True                                      # <-- cheiță nouă
+    },
+
     "IP-Adapter Plus (SDXL)": {
         "model_id": "h94/IP-Adapter",
         "subfolder": "sdxl_models",
@@ -519,29 +548,39 @@ def load_controlnet(controlnet_name, model_type="SD", progress=None):
         logger.error(error_msg)
         return None
 
-def load_ip_adapter(ip_adapter_name, sd_pipe, is_xl=False, progress=None):
+# ---------------------------------------------------------------------------
+#  IP-Adapter loader – versiune cu suport SINGLE / MULTI  (01-mai-2025)
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+#  IP-Adapter loader – suport SINGLE + MULTI (rev. 01-mai-2025)
+# ---------------------------------------------------------------------------
+def load_ip_adapter(
+    ip_adapter_name: str,
+    sd_pipe,
+    is_xl: bool = False,
+    progress = None,
+):
     """
-    Attach an IP-Adapter to an existing Stable-Diffusion pipeline.
+    Ataşează un IP-Adapter (Plus / Multi) la un pipeline Diffusers.
 
     Parameters
     ----------
     ip_adapter_name : str
-        Name of the adapter in IP_ADAPTER_MODELS.
-    sd_pipe : diffusers.DiffusionPipeline
-        Already loaded pipeline (StableDiffusionXLPipeline, SDPipeline etc.).
-    is_xl : bool, optional
-        True if the pipeline is SDXL; selects IPAdapterPlusXL variant.
-    progress : gradio.Progress or None, optional
-        Gradio progress object for UI feedback.
+        Cheie din dict-ul IP_ADAPTER_MODELS
+    sd_pipe : DiffusionPipeline
+        Pipeline deja încărcat (SD / SDXL, cu sau fără ControlNet)
+    is_xl : bool
+        True dacă pipeline-ul este SDXL
+    progress : gr.Progress | None
+        Pentru feedback în UI
 
     Returns
     -------
-    ip_adapter : IPAdapterPlus | IPAdapterPlusXL | None
-        Ready-to-use IP-Adapter instance or None if loading failed.
+    ip_adapter  (Plus / PlusXL / Multi / MultiXL)  sau None dacă a eşuat
     """
-    # 1. Quick checks ----------------------------------------------------
+    # ── 0. Filtru rapid ────────────────────────────────────────────────
     if (
-        not IP_ADAPTER_AVAILABLE 
+        not IP_ADAPTER_AVAILABLE              # pachetul nu e instalat
         or not ip_adapter_name
         or ip_adapter_name == "None"
     ):
@@ -549,75 +588,100 @@ def load_ip_adapter(ip_adapter_name, sd_pipe, is_xl=False, progress=None):
 
     adapter_cfg = IP_ADAPTER_MODELS.get(ip_adapter_name)
     if adapter_cfg is None:
+        logger.warning(f"Config inexistent pentru «{ip_adapter_name}»")
         return None
 
+    want_multi = bool(adapter_cfg.get("multi", False))
+    device     = "cuda" if torch.cuda.is_available() else "cpu"
+    num_tokens = 16 if "vit-h" in adapter_cfg["weight_name"] else 4
+
+    # ── 1. Mesaj UI ────────────────────────────────────────────────────
     update_status(f"Loading IP-Adapter: {ip_adapter_name}")
     if progress is not None:
-        progress(0.1, desc=f"Loading IP-Adapter: {ip_adapter_name}...")
+        progress(0.10, desc = f"Loading {ip_adapter_name}…")
 
-    # 2. Prepare local cache paths ------------------------------------------
-    cache_path = os.path.join(IPADAPTER_DIR, ip_adapter_name.replace(" ", "_").lower())
-    os.makedirs(cache_path, exist_ok=True)
-    tokens = 16 if "vit-h" in adapter_cfg["weight_name"] else 4
+    # ── 2. Căi local-cache + download ckpt & image-encoder ────────────
+    cache_path = os.path.join(
+        IPADAPTER_DIR, ip_adapter_name.replace(" ", "_").lower()
+    )
+    os.makedirs(cache_path, exist_ok = True)
 
     try:
-        # --- 1. Download the checkpoint ---
+        # 2A. checkpoint
         ip_ckpt_local = hf_hub_download(
             repo_id   = adapter_cfg["model_id"],
             filename  = adapter_cfg["weight_name"],
             subfolder = adapter_cfg["subfolder"],
             cache_dir = cache_path,
-            resume_download=True,
+            resume_download = True,
         )
 
-        # --- 2. Download the *whole* image-encoder folder ---
+        # 2B. image-encoder folder
         repo_local = snapshot_download(
-            repo_id               = adapter_cfg["model_id"],
-            local_dir             = cache_path,
-            local_dir_use_symlinks= False,
-            resume_download       = True,
-            allow_patterns        = ["models/image_encoder/*", "sdxl_models/image_encoder/*"],  # Allow both paths
+            repo_id                 = adapter_cfg["model_id"],
+            local_dir               = cache_path,
+            local_dir_use_symlinks  = False,
+            resume_download         = True,
+            allow_patterns          = [
+                "models/image_encoder/*",
+                "sdxl_models/image_encoder/*",
+            ],
         )
-        
-        # Try both potential paths for the image encoder
         if os.path.exists(os.path.join(repo_local, "models", "image_encoder")):
-            image_encoder_path = os.path.join(repo_local, "models", "image_encoder")
-        elif os.path.exists(os.path.join(repo_local, "sdxl_models", "image_encoder")):
-            image_encoder_path = os.path.join(repo_local, "sdxl_models", "image_encoder")
+            image_encoder_path = os.path.join(
+                repo_local, "models", "image_encoder"
+            )
+        elif os.path.exists(
+            os.path.join(repo_local, "sdxl_models", "image_encoder")
+        ):
+            image_encoder_path = os.path.join(
+                repo_local, "sdxl_models", "image_encoder"
+            )
         else:
-            logger.error("Could not find image encoder path in downloaded files")
+            logger.error("⚠️  image_encoder absent în fişierele descărcate.")
             return None
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        # --- 3. Instantiate ---
-        if is_xl:
-            ip_adapter = IPAdapterPlusXL(
-                sd_pipe            = sd_pipe,
-                image_encoder_path = image_encoder_path,
-                ip_ckpt            = ip_ckpt_local,
-                device             = device,
-                num_tokens         = tokens,
+        # ── 3. Import din pachetul oficial - sau din wrapper personal ──
+        try:                                    # pachet Tencent
+            from ip_adapter import (
+                IPAdapterPlus,  IPAdapterPlusXL,
+                IPAdapterMulti, 
             )
+        except ImportError:
+            # Multi nu există în pachetul public ➜ luăm propriul wrapper
+            from ip_adapter import IPAdapterPlus, IPAdapterPlusXL
+            from ip_adapter_multi import IPAdapterMulti
+        # ── 4. Alegem clasa potrivită ──────────────────────────────────
+        # 4. Alegem clasa potrivită
+        if is_xl and want_multi:
+            ip_cls = IPAdapterMulti        # wrapperul nostru (merge şi pe SDXL)
+        elif is_xl:
+            ip_cls = IPAdapterPlusXL
+        elif want_multi:                   # <- aici era greşeala
+            ip_cls = IPAdapterMulti
         else:
-            ip_adapter = IPAdapterPlus(
-                sd_pipe            = sd_pipe,
-                image_encoder_path = image_encoder_path,
-                ip_ckpt            = ip_ckpt_local,
-                device             = device,
-                num_tokens         = tokens,
-            )
+            ip_cls = IPAdapterPlus
+
+
+        # ── 5. Instanţiere ─────────────────────────────────────────────
+        ip_adapter = ip_cls(
+            sd_pipe            = sd_pipe,
+            image_encoder_path = image_encoder_path,
+            ip_ckpt            = ip_ckpt_local,
+            device             = device,
+            num_tokens         = num_tokens,
+        )
 
         if progress is not None:
-            progress(0.9, desc="IP-Adapter loaded successfully")
-        update_status(f"IP-Adapter {ip_adapter_name} loaded successfully")
+            progress(0.90, desc = "IP-Adapter ready ✔")
+        update_status(f"IP-Adapter «{ip_adapter_name}» loaded successfully")
         return ip_adapter
 
+    # ── 6. Eroare gravă ────────────────────────────────────────────────
     except Exception as e:
-        error_msg = f"Error loading IP-Adapter: {e}"
-        update_status(error_msg)
-        logger.error(error_msg)
-        import traceback; traceback.print_exc()
+        msg = f"Error loading IP-Adapter: {e}"
+        update_status(msg)
+        logger.error(msg, exc_info = True)
         return None
 
 
@@ -1020,6 +1084,17 @@ def _blank(img_h, img_w):
     """Returnează un RGB alb de mărimea cerută (PIL)."""
     return Image.new("RGB", (img_w, img_h), (255, 255, 255))
 
+# -----------------------------------------------------------------------------
+#  generate_images – ediţia „multi-reference” (body + bg)  –  1-mai-2025
+# -----------------------------------------------------------------------------
+#from ip_adapter_multi import IPAdapterMulti       # noul wrapper
+from diffusers.pipelines.controlnet.pipeline_controlnet_sd_xl import (
+    StableDiffusionXLControlNetPipeline,
+)
+from diffusers.pipelines.controlnet.pipeline_controlnet import (
+    StableDiffusionControlNetPipeline,
+)
+
 def generate_images(
     model_name,
     person_image,
@@ -1072,21 +1147,15 @@ def generate_images(
     ).manual_seed(seed)
 
     # ───────────────────────── 2. Pregătim imaginile ───────────────────────
-    def prep(img): 
-        if img is None:
-            return None
-        try:
-            return prepare_image(img)
-        except Exception as e:
-            logger.error(f"Error preparing image: {e}")
-            return None
-            
+    def prep(img):
+        return prepare_image(img) if img is not None else None
+
     person_img, clothing_img, background_img = map(
         prep, (person_image, clothing_image, background_image))
 
-    has_person = person_img is not None
-    has_cloth = clothing_img is not None
-    has_back = background_img is not None
+    has_person  = person_img      is not None
+    has_cloth   = clothing_img    is not None
+    has_back    = background_img  is not None
 
     # dacă ControlNet e solicitat dar lipseşte persoana ▶ dezactivăm
     if controlnet_type != "None" and not has_person:
@@ -1108,88 +1177,55 @@ def generate_images(
 
     # ───────────────────────── 4. ControlNet conditioning ──────────────────
     controlnet_img = None
-    if controlnet_type != "None" and has_person:  # Check if person image exists
+    if controlnet_type != "None" and has_person:
         progress(0.30, desc=f"Generating {controlnet_type} conditioning…")
         try:
             controlnet_img = generate_controlnet_conditioning(
                 person_img, controlnet_type, progress)
-            # Explicitly validate the controlnet image
             if controlnet_img is None or not isinstance(controlnet_img, Image.Image):
-                logger.warning(f"ControlNet conditioning returned invalid image: {type(controlnet_img)} ➜ ignoring.")
-                controlnet_type = "None"
+                logger.warning("ControlNet conditioning invalid ➜ ignor.")
+                controlnet_type, controlnet_img = "None", None
         except Exception as e:
-            logger.error(f"Error generating controlnet conditioning: {e}")
-            controlnet_type = "None"
-            controlnet_img = None
+            logger.error(f"ControlNet conditioning failed: {e}")
+            controlnet_type, controlnet_img = "None", None
 
-    # ───────────────────────── 5. IP-Adapter (opţional) ────────────────────
-    # Get the IP-Adapter instance
-    ip_adapter = loaded_components.get("ip_adapter")
-    
-    # First check if we have a valid IP-Adapter and it's enabled
-    use_ip_adapter = (ip_adapter is not None and 
-                     ip_adapter_name != "None" and 
-                     ip_adapter_scale > 0.0)
-    
-    if not use_ip_adapter:
-        logger.info("IP-Adapter disabled due to settings")
-        ip_adapter = None
-    else:
-        # Determine the best reference image to use - person has priority
-        ref_image = None
-        if has_person:
-            ref_image = person_img
-            logger.info("Using person image for IP-Adapter")
-        elif has_cloth:
-            ref_image = clothing_img
-            logger.info("Using clothing image for IP-Adapter")
-        elif has_back:
-            ref_image = background_img
-            logger.info("Using background image for IP-Adapter")
-            
-        # Double check we have a valid image
-        if ref_image is None:
-            logger.warning("No valid reference image for IP-Adapter ➜ disabling")
-            ip_adapter = None
-        elif not isinstance(ref_image, Image.Image):
-            logger.warning(f"Reference image is not a PIL Image: {type(ref_image)} ➜ disabling IP-Adapter")
-            ip_adapter = None
-        else:
-            # Set the adapter scale
-            try:
-                if hasattr(ip_adapter, "set_ip_adapter_scale"):
-                    ip_adapter.set_ip_adapter_scale(ip_adapter_scale)
-                logger.info(f"IP-Adapter on (scale={ip_adapter_scale}) with image {ref_image.size}")
-            except Exception as e:
-                logger.error(f"Error setting IP-Adapter scale: {e} ➜ disabling")
-                ip_adapter = None
+    # ───────────────────────── 5. IP-Adapter refs  ─────────────────────────
+    ip_adapter: Optional[Any] = loaded_components.get("ip_adapter")
 
-    # ───────────────────────── 6. LoRA-uri ─────────────────────────────────
+    # greutăţi relative (fără scala globală)
+    refs: list[tuple[Image.Image, float]] = []
+    if person_img:     refs.append((person_img,     0.60))
+    if clothing_img:   refs.append((clothing_img,   0.30))
+    if background_img: refs.append((background_img, 0.10))
+
+    # use_ip_multi = (
+    #     isinstance(ip_adapter, IPAdapterMulti) and
+    #     refs and ip_adapter_scale > 0
+    # )
+
+    single_ref: Optional[Image.Image] = person_img or clothing_img or background_img
+
+    # ───────────────────────── 6. LoRA-uri  ────────────────────────────────
     progress(0.35, desc="Loading LoRAs…")
     for l_name, l_weight in [
-        (lora1, lora1_weight),
-        (lora2, lora2_weight),
-        (lora3, lora3_weight),
-        (lora4, lora4_weight),
-        (lora5, lora5_weight),
+        (lora1, lora1_weight), (lora2, lora2_weight),
+        (lora3, lora3_weight), (lora4, lora4_weight), (lora5, lora5_weight)
     ]:
         if l_name and l_name != "None":
             l_path = lora_files.get(l_name)
-            if l_path: pipe = load_lora_weights(pipe, l_path, l_weight)
+            if l_path:
+                pipe = load_lora_weights(pipe, l_path, l_weight)
 
-    # ───────────────────────── 7. Generare ─────────────────────────────────
+    # ───────────────────────── 7. Generare  ────────────────────────────────
     progress(0.40, desc="Generating…")
     outputs = []
 
-    # determinăm dacă pipeline-ul curent este *ControlNet* şi avem **None**
     needs_dummy = (
         controlnet_type == "None" and
         isinstance(
             pipe,
-            (
-                StableDiffusionXLControlNetPipeline,
-                StableDiffusionControlNetPipeline,
-            )
+            (StableDiffusionXLControlNetPipeline,
+             StableDiffusionControlNetPipeline)
         )
     )
     dummy_img = _blank(image_height, image_width) if needs_dummy else None
@@ -1198,46 +1234,64 @@ def generate_images(
         progress(0.40 + 0.50 * i / max(num_outputs,1),
                  desc=f"Image {i+1}/{num_outputs}")
 
-        # —— 7A. IP-Adapter if available ————————————————
-        if ip_adapter is not None and ref_image is not None:
-            try:
-                logger.info(f"Generating with IP-Adapter using image {ref_image.size}")
-                
-                # Debug - explicitly verify the image is valid before passing to IP-Adapter
-                if not isinstance(ref_image, Image.Image) or ref_image.size[0] == 0:
-                    raise ValueError(f"Invalid reference image for IP-Adapter: {type(ref_image)}")
-                
-                # IP-Adapter handles the generator internally - don't pass it explicitly
-                img_result = ip_adapter.generate(
-                    pil_image           = ref_image,
-                    prompt              = full_prompt,
-                    negative_prompt     = negative_prompt,
-                    num_samples         = 1,
-                    num_inference_steps = num_inference_steps,
-                    guidance_scale      = guidance_scale,
-                    width               = image_width,
-                    height              = image_height,
-                )
-                
-                # Debug the output
-                logger.info(f"IP-Adapter result: {type(img_result)}, len: {len(img_result) if isinstance(img_result, list) else 'not a list'}")
-                
-                if isinstance(img_result, list) and len(img_result) > 0:
-                    if isinstance(img_result[0], Image.Image):
-                        outputs.append(img_result[0])
-                        continue
-                    else:
-                        logger.warning(f"IP-Adapter returned non-image result: {type(img_result[0])} ➜ fallback to diffusers")
-                else:
-                    logger.warning(f"IP-Adapter returned empty or invalid result ➜ fallback to diffusers")
-            except Exception as e:
-                logger.error(f"IP-Adapter failed: {e} ➜ fallback diffusers.")
-                import traceback
-                traceback.print_exc()
 
-        # —— 7B. Standard Diffusion ————————————————
+
+        use_ip_multi = (
+            ip_adapter is not None
+            and hasattr(ip_adapter, "generate_multi")  # ← nu mai depinde de clasă
+            and refs                                  # avem cel puţin o imagine
+            and ip_adapter_scale > 0
+        )
+
+  
+        # —— 7A. IP-Adapter ————————————————————————————————————————
+        ip_success = False
+        if ip_adapter and ip_adapter_scale > 0:
+            try:
+                if use_ip_multi:
+                    logger.info("IP-Adapter MULTI-REF")
+                    img_result = ip_adapter.generate_multi(
+                        refs,                          # pozitional
+                        scale = ip_adapter_scale,
+                        prompt = full_prompt,
+                        negative_prompt = negative_prompt,
+                        num_samples = 1,
+                        num_inference_steps = num_inference_steps,
+                        guidance_scale = guidance_scale,
+                        width  = image_width,
+                        height = image_height,
+                    )
+                elif single_ref is not None:
+                    logger.info("IP-Adapter SINGLE-REF")
+                    img_result = ip_adapter.generate(
+                        pil_image           = single_ref,
+                        scale               = ip_adapter_scale,   #  ←-- şi aici!
+                        prompt              = full_prompt,
+                        negative_prompt     = negative_prompt,
+                        num_samples         = 1,
+                        num_inference_steps = num_inference_steps,
+                        guidance_scale      = guidance_scale,
+                        width               = image_width,
+                        height              = image_height,
+                    )
+                else:
+                    img_result = None
+
+                if (isinstance(img_result, list) and img_result and
+                        isinstance(img_result[0], Image.Image)):
+                    outputs.append(img_result[0])
+                    ip_success = True
+                else:
+                    logger.warning("⚠️  IP-Adapter nu a returnat o imagine validă")
+            except Exception as e:
+                logger.error(f"❌  IP-Adapter error: {e}", exc_info=True)
+
+        if ip_success:
+            continue
+
+
+        # —— 7B.  Diffusers „clasic”  ——————————————————
         try:
-            logger.info("Using standard diffusion pipeline")
             params = dict(
                 prompt              = full_prompt,
                 negative_prompt     = negative_prompt,
@@ -1247,29 +1301,22 @@ def generate_images(
                 width               = image_width,
                 height              = image_height,
             )
-
             if controlnet_type != "None" and controlnet_img is not None:
-                logger.info(f"Using ControlNet with image {controlnet_img.size if hasattr(controlnet_img, 'size') else type(controlnet_img)}")
                 params.update(
                     image = [controlnet_img],
-                    controlnet_conditioning_scale = controlnet_conditioning_scale,
+                    controlnet_conditioning_scale = controlnet_conditioning_scale
                 )
             elif needs_dummy:
-                # pipeline de ControlNet dar nu vrem control ➜ trimitem dummy
-                logger.info("Using dummy image for ControlNet")
-                params["image"] = [dummy_img]
-                params["controlnet_conditioning_scale"] = 0.0
+                params.update(image=[dummy_img], controlnet_conditioning_scale=0.0)
 
             result = pipe(**params)
             outputs.append(result.images[0])
         except Exception as e:
             err = f"❌  Diffusion failed: {e}"
-            logger.error(err)
-            import traceback
-            traceback.print_exc()
+            logger.error(err, exc_info=True)
             return [], seed, err
 
-    # ───────────────────────── 8. Salvare & finalize ───────────────────────
+    # ───────────────────────── 8. Salvare & finale  ────────────────────────
     progress(0.95, desc="Saving…")
     ts = time.strftime("%Y%m%d_%H%M%S")
     for idx, img in enumerate(outputs):
@@ -1279,6 +1326,7 @@ def generate_images(
     logger.info(msg)
     progress(1.00, desc="Done.")
     return outputs, seed, msg
+
 
 def test_generation():
     """Generate a test image to verify backend is working"""
