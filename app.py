@@ -2,6 +2,9 @@ import os
 import sys
 import torch
 import gradio as gr
+print(f"Gradio version installed: {gr.__version__}")
+if gr.__version__ < "3.40.0":
+    print("WARNING: You are using an old version of Gradio. This may cause UI issues.")
 import numpy as np
 from PIL import Image, ImageOps, ImageDraw
 import requests
@@ -1487,7 +1490,7 @@ def create_interface():
             inputs=None,  # Nu are nevoie de inputuri
             outputs=[output_gallery, output_seed, output_message]  # Aceleași outputuri ca generate_button
         )
-        
+
         # Update status display function
         def update_status_display():
             return global_status_message
