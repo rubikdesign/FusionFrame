@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Script de instalare îmbunătățit pentru FusionFrame pe RunPod
-- Rezolvă problemele de compatibilitate CUDA
-- Gestionează erorile de instalare a pachetelor
-- Implementează o strategie de failover pentru dependențe problematice
+Enhanced installation script for FusionFrame on RunPod
+- Fixes CUDA compatibility issues
+- Handles package installation errors
+- Implements failover strategies for problematic dependencies
 """
 
 import os
@@ -16,7 +16,7 @@ from pathlib import Path
 import time
 import json
 
-# Configurare logging
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -27,34 +27,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger("installer")
 
-# Setare parser argumente
-parser = argparse.ArgumentParser(description="FusionFrame - Platformă de generare imagini pentru îmbrăcare virtuală")
+# Set up argument parser
+parser = argparse.ArgumentParser(description="FusionFrame - Virtual Try-On Image Generation Platform")
 parser.add_argument("--app-dir", type=str, default="FusionFrame", 
-                    help="Numele directorului aplicației (default: FusionFrame)")
+                    help="Application directory name (default: FusionFrame)")
 parser.add_argument("--port", type=int, default=7860, 
-                    help="Port pentru interfața web Gradio")
+                    help="Port for Gradio web interface")
 parser.add_argument("--cuda-version", type=str, default="118", 
                     choices=["116", "117", "118", "121"],
-                    help="Versiunea CUDA pentru PyTorch")
+                    help="CUDA version for PyTorch")
 parser.add_argument("--torch-version", type=str, default="2.0.1", 
                     choices=["1.13.1", "2.0.1", "2.1.2", "2.2.0"],
-                    help="Versiunea PyTorch (pentru compatibilitate CUDA)")
+                    help="PyTorch version (for CUDA compatibility)")
 parser.add_argument("--repo-path", type=str, default=".", 
-                    help="Calea către directorul repo-ului (default: director curent)")
+                    help="Path to repository directory (default: current directory)")
 parser.add_argument("--no-xformers", action="store_true", 
-                    help="Dezactivează instalarea xformers")
+                    help="Disable xformers installation")
 parser.add_argument("--download-models", action="store_true", 
-                    help="Descarcă modele predefinite (durează mult)")
+                    help="Download predefined models (takes a long time)")
 parser.add_argument("--shared", action="store_true", 
-                    help="Permite accesul public la interfață")
+                    help="Allow public access to interface")
 parser.add_argument("--fix-cuda", action="store_true", 
-                    help="Forțează reinstalarea CUDA pentru a rezolva probleme de compatibilitate")
+                    help="Force CUDA reinstallation to fix compatibility issues")
 parser.add_argument("--continue-on-error", action="store_true", 
-                    help="Continuă instalarea chiar dacă unele pachete eșuează")
+                    help="Continue installation even if some packages fail")
 
 args = parser.parse_args()
 
-# Configurarea directoarelor
+# Configure directories
 WORKSPACE_DIR = Path("/workspace") if os.path.exists("/workspace") else Path.home()
 REPO_PATH = Path(args.repo_path).absolute()
 APP_DIR = WORKSPACE_DIR / args.app_dir
@@ -62,8 +62,8 @@ CACHE_DIR = APP_DIR / "cache"
 LOG_DIR = APP_DIR / "logs"
 MODEL_DIR = APP_DIR / "models"
 
-# Pachete necesare cu versiuni fixate pentru stabilitate și alternative
-# Format: [(pachet, este_esențial, alternative)]
+# Required packages with fixed versions and alternatives
+# Format: [(package, is_essential, alternatives)]
 PACKAGES = [
     ("huggingface_hub==0.16.4", True, ["huggingface_hub==0.15.1"]),
     ("transformers==4.30.2", True, ["transformers==4.29.2"]),
@@ -73,17 +73,17 @@ PACKAGES = [
     ("pillow==9.5.0", True, ["pillow==9.4.0"]),
     ("tqdm==4.65.0", False, ["tqdm"]), 
     ("requests==2.31.0", False, ["requests"]),
-    # Pachete non-esențiale pot fi omise
+    # Non-essential packages can be skipped
     ("gradio==3.33.1", False, ["gradio==3.32.0", "gradio==3.31.0", "gradio==3.30.0"]),
     ("opencv-python==4.7.0.72", False, ["opencv-python==4.6.0.66", "opencv-python"]),
     ("controlnet-aux==0.0.6", False, ["controlnet-aux==0.0.5", "controlnet-aux"]),
     ("timm==0.9.2", False, ["timm==0.6.12", "timm"]),
-    # mediapipe e problematic pe RunPod - încercăm versiuni alternative
+    # mediapipe is problematic on RunPod - try alternative versions
     ("mediapipe==0.10.0", False, ["mediapipe==0.9.0.1", "mediapipe==0.8.10", ""]),
     ("bitsandbytes==0.35.4", False, ["bitsandbytes", ""]),
 ]
 
-# Versiuni pentru evitarea conflictelor NCCL
+# Versions to avoid NCCL conflicts
 CUDA_FIXES = {
     "118": {
         "torch_version": "2.0.1",
@@ -103,7 +103,7 @@ CUDA_FIXES = {
 }
 
 def run_command(command, desc=None, check=True, shell=False, env=None, verbose=False):
-    """Execută o comandă și loghează output-ul"""
+    """Execute a command and log the output"""
     if desc:
         logger.info(f"🔄 {desc}...")
     
@@ -111,7 +111,7 @@ def run_command(command, desc=None, check=True, shell=False, env=None, verbose=F
     try:
         process = subprocess.run(
             cmd_list, 
-            check=False,  # Gestionăm noi erorile pentru flexibilitate 
+            check=False,  # We handle errors for flexibility 
             shell=shell,
             stdout=subprocess.PIPE, 
             stderr=subprocess.PIPE,
@@ -125,49 +125,49 @@ def run_command(command, desc=None, check=True, shell=False, env=None, verbose=F
         
         if process.returncode != 0:
             if process.stderr:
-                logger.error(f"Eroare: {process.stderr.strip()}")
+                logger.error(f"Error: {process.stderr.strip()}")
             if check:
                 raise subprocess.CalledProcessError(process.returncode, command)
         
         return process
     except subprocess.CalledProcessError as e:
         if check:
-            logger.error(f"Comandă eșuată: {e}")
+            logger.error(f"Command failed: {e}")
             raise
         return None
     except Exception as e:
-        logger.error(f"Excepție la rularea comenzii: {e}")
+        logger.error(f"Exception running command: {e}")
         if check:
             raise
         return None
 
 def setup_directories():
-    """Creează directoarele necesare"""
-    logger.info(f"🔄 Creez directoare în {APP_DIR}...")
+    """Create necessary directories"""
+    logger.info(f"🔄 Creating directories in {APP_DIR}...")
     for dir_path in [APP_DIR, CACHE_DIR, LOG_DIR, MODEL_DIR]:
         dir_path.mkdir(parents=True, exist_ok=True)
-        logger.info(f"✅ Creat director: {dir_path}")
+        logger.info(f"✅ Created directory: {dir_path}")
 
 def check_gpu():
-    """Verifică disponibilitatea GPU și CUDA"""
-    logger.info("🔄 Verific GPU...")
+    """Check GPU and CUDA availability"""
+    logger.info("🔄 Checking GPU...")
     try:
-        nvidia_smi = run_command("nvidia-smi", desc="Rulare nvidia-smi", check=False)
+        nvidia_smi = run_command("nvidia-smi", desc="Running nvidia-smi", check=False)
         if nvidia_smi and nvidia_smi.returncode == 0:
-            logger.info("✅ GPU detectat")
+            logger.info("✅ GPU detected")
             
-            # Script pentru verificarea CUDA cu PyTorch
+            # Script to check CUDA with PyTorch
             check_script = """
 import torch
 if torch.cuda.is_available():
-    print(f"CUDA disponibil: {torch.cuda.get_device_name(0)}")
-    print(f"Versiune CUDA: {torch.version.cuda}")
+    print(f"CUDA available: {torch.cuda.get_device_name(0)}")
+    print(f"CUDA version: {torch.version.cuda}")
     try:
-        print(f"Memorie GPU: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
+        print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
     except:
-        print("Nu pot obține informații despre memorie")
+        print("Cannot get memory information")
 else:
-    print("CUDA nu este disponibil")
+    print("CUDA is not available")
     exit(1)
 """
             with open(APP_DIR / "check_cuda.py", "w") as f:
@@ -175,52 +175,52 @@ else:
             
             return True
         else:
-            logger.warning("⚠️ GPU nu a fost detectat. Aplicația va rula în mod CPU (foarte lent).")
+            logger.warning("⚠️ GPU not detected. Application will run in CPU mode (very slow).")
             return False
     except Exception as e:
-        logger.warning(f"⚠️ Nu pot verifica GPU: {e}")
+        logger.warning(f"⚠️ Cannot check GPU: {e}")
         return False
 
 def fix_cuda_environment():
-    """Corectează variabilele de mediu CUDA"""
-    logger.info("🔄 Configurez variabile de mediu CUDA...")
+    """Fix CUDA environment variables"""
+    logger.info("🔄 Setting CUDA environment variables...")
     
-    # Setăm variabile de mediu pentru a evita conflicte NCCL
+    # Set environment variables to avoid NCCL conflicts
     env_vars = {
         "NCCL_P2P_DISABLE": "1",
         "NCCL_DEBUG": "INFO",
         "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512"
     }
     
-    # Actualizăm ~/.bashrc pentru a păstra aceste setări
+    # Update ~/.bashrc to keep these settings
     bashrc_path = os.path.expanduser("~/.bashrc")
     try:
         with open(bashrc_path, "a") as f:
             f.write("\n# FusionFrame CUDA environment settings\n")
             for var, value in env_vars.items():
                 f.write(f"export {var}={value}\n")
-                # Setăm și pentru sesiunea curentă
+                # Set for current session too
                 os.environ[var] = value
     except Exception as e:
-        logger.warning(f"Nu pot actualiza ~/.bashrc: {e}")
-        # Continuăm, deoarece acest lucru nu este critic
+        logger.warning(f"Cannot update ~/.bashrc: {e}")
+        # Continue, as this is not critical
     
-    logger.info("✅ Variabile de mediu CUDA configurate")
+    logger.info("✅ CUDA environment variables configured")
     return env_vars
 
 def install_pytorch(cuda_version, torch_version=None, fix_cuda=False):
-    """Instalează PyTorch cu suport CUDA corespunzător"""
+    """Install PyTorch with appropriate CUDA support"""
     
     if fix_cuda or args.fix_cuda:
-        # Dezinstalăm PyTorch existent pentru a evita conflicte
-        logger.info("🔄 Dezinstalez PyTorch existent...")
+        # Uninstall existing PyTorch to avoid conflicts
+        logger.info("🔄 Uninstalling existing PyTorch...")
         run_command("pip uninstall -y torch torchvision torchaudio", 
-                   desc="Dezinstalare PyTorch", shell=True, check=False)
+                   desc="Uninstalling PyTorch", shell=True, check=False)
     
-    # Folosim configurația CUDA din dicționar
+    # Use CUDA configuration from dictionary
     cuda_config = CUDA_FIXES.get(cuda_version, CUDA_FIXES["118"])
     
-    # Utilizăm versiunea specificată sau cea din config
+    # Use specified version or the one from config
     if torch_version:
         torch_ver = torch_version
     else:
@@ -228,79 +228,79 @@ def install_pytorch(cuda_version, torch_version=None, fix_cuda=False):
     
     cuda_extra = cuda_config["cuda_extra"]
     
-    logger.info(f"🔄 Instalez PyTorch {torch_ver} cu CUDA {cuda_version}...")
+    logger.info(f"🔄 Installing PyTorch {torch_ver} with CUDA {cuda_version}...")
     
-    # Instalăm PyTorch cu versiunea specificată
+    # Install PyTorch with specified version
     install_cmd = f"pip install torch=={torch_ver} torchvision torchaudio {cuda_extra}"
-    run_command(install_cmd, desc=f"Instalare PyTorch {torch_ver}", shell=True)
+    run_command(install_cmd, desc=f"Installing PyTorch {torch_ver}", shell=True)
     
-    # Verificăm instalarea CUDA
+    # Check CUDA installation
     if os.path.exists(APP_DIR / "check_cuda.py"):
-        logger.info("🔄 Verific instalarea CUDA...")
+        logger.info("🔄 Verifying CUDA installation...")
         cuda_check = run_command(f"python {APP_DIR / 'check_cuda.py'}", 
-                                desc="Verificare CUDA PyTorch", check=False, shell=True)
+                                desc="Checking PyTorch CUDA", check=False, shell=True)
         
         if cuda_check and cuda_check.returncode == 0:
-            logger.info("✅ PyTorch + CUDA instalat corect")
+            logger.info("✅ PyTorch + CUDA installed correctly")
         else:
-            logger.warning("⚠️ Verificare CUDA eșuată. Încerc o altă versiune...")
+            logger.warning("⚠️ CUDA verification failed. Trying another version...")
             if cuda_version == "118":
-                logger.info("🔄 Încercăm cu CUDA 117...")
+                logger.info("🔄 Trying with CUDA 117...")
                 install_pytorch("117", torch_version="1.13.1", fix_cuda=True)
 
 def install_package(package, is_essential=True, alternatives=None):
-    """Instalează un pachet Python cu alternativele ca backup"""
-    logger.info(f"🔄 Instalez {package}...")
+    """Install a Python package with alternatives as backup"""
+    logger.info(f"🔄 Installing {package}...")
     
     try:
-        # Încercăm prima dată versiunea principală
+        # Try the main version first
         result = run_command(f"pip install {package}", 
-                          desc=f"Instalare {package}", 
+                          desc=f"Installing {package}", 
                           shell=True, 
                           check=False)
         
         if result and result.returncode == 0:
-            logger.info(f"✅ {package} instalat cu succes")
+            logger.info(f"✅ {package} installed successfully")
             return True
         
-        logger.warning(f"⚠️ Nu am putut instala {package}, încerc alternative...")
+        logger.warning(f"⚠️ Could not install {package}, trying alternatives...")
         
-        # Dacă prima versiune eșuează, încercăm alternativele
+        # If first version fails, try alternatives
         if alternatives:
             for alt in alternatives:
-                if not alt:  # Opțiune goală înseamnă că putem sări peste
-                    logger.info(f"🔶 {package} este opțional, continuăm fără el")
+                if not alt:  # Empty option means we can skip
+                    logger.info(f"🔶 {package} is optional, continuing without it")
                     return True
                 
-                logger.info(f"🔄 Încerc alternativa: {alt}")
+                logger.info(f"🔄 Trying alternative: {alt}")
                 alt_result = run_command(f"pip install {alt}", 
-                                      desc=f"Instalare {alt}", 
+                                      desc=f"Installing {alt}", 
                                       shell=True, 
                                       check=False)
                 
                 if alt_result and alt_result.returncode == 0:
-                    logger.info(f"✅ Alternativa {alt} instalată cu succes")
+                    logger.info(f"✅ Alternative {alt} installed successfully")
                     return True
         
-        # Dacă ajungem aici, toate încercările au eșuat
+        # If we reach here, all attempts failed
         if is_essential:
-            logger.error(f"❌ Nu am putut instala pachetul esențial {package} și alternativele")
+            logger.error(f"❌ Could not install essential package {package} and alternatives")
             if not args.continue_on_error:
-                raise Exception(f"Instalare eșuată pentru pachetul esențial {package}")
+                raise Exception(f"Installation failed for essential package {package}")
             return False
         else:
-            logger.warning(f"⚠️ Nu am putut instala pachetul opțional {package}, dar continuăm instalarea")
+            logger.warning(f"⚠️ Could not install optional package {package}, but continuing installation")
             return True
             
     except Exception as e:
-        logger.error(f"❌ Eroare la instalarea {package}: {e}")
+        logger.error(f"❌ Error installing {package}: {e}")
         if is_essential and not args.continue_on_error:
             raise
         return False
 
 def install_dependencies():
-    """Instalează dependențele Python necesare"""
-    logger.info("🔄 Instalez pachete Python cu strategii de failover...")
+    """Install required Python dependencies"""
+    logger.info("🔄 Installing Python packages with failover strategies...")
     
     success_count = 0
     failure_count = 0
@@ -312,132 +312,132 @@ def install_dependencies():
         else:
             failure_count += 1
     
-    # IP-Adapter-ul necesită o instalare specială
-    logger.info("🔄 Instalez IP-Adapter...")
+    # IP-Adapter needs special installation
+    logger.info("🔄 Installing IP-Adapter...")
     try:
         run_command(
             "pip install git+https://github.com/tencent-ailab/IP-Adapter.git@main",
-            desc="Instalare IP-Adapter",
+            desc="Installing IP-Adapter",
             shell=True,
             check=False
         )
         success_count += 1
     except:
-        logger.warning("⚠️ Instalare IP-Adapter eșuată, încerc alternativa...")
+        logger.warning("⚠️ IP-Adapter installation failed, trying alternative...")
         try:
             run_command(
                 "pip install ip-adapter",
-                desc="Instalare IP-Adapter (alternativ)",
+                desc="Installing IP-Adapter (alternative)",
                 shell=True,
                 check=False
             )
             success_count += 1
         except:
-            logger.error("❌ Nu am putut instala IP-Adapter")
+            logger.error("❌ Could not install IP-Adapter")
             failure_count += 1
     
-    # Instalăm diffusers direct din GitHub pentru compatibilitate maximă
-    logger.info("🔄 Instalez Diffusers...")
+    # Install diffusers directly from GitHub for maximum compatibility
+    logger.info("🔄 Installing Diffusers...")
     try:
-        # Încercăm întâi o versiune fixată pentru stabilitate
+        # Try a fixed version first for stability
         run_command(
             "pip install diffusers==0.21.4",
-            desc="Instalare Diffusers (versiune fixată)",
+            desc="Installing Diffusers (fixed version)",
             shell=True,
             check=False
         )
         success_count += 1
     except:
-        logger.warning("⚠️ Instalare Diffusers eșuată, încerc din GitHub...")
+        logger.warning("⚠️ Diffusers installation failed, trying from GitHub...")
         try:
             run_command(
                 "pip install git+https://github.com/huggingface/diffusers.git@v0.21.4",
-                desc="Instalare Diffusers din GitHub",
+                desc="Installing Diffusers from GitHub",
                 shell=True,
                 check=False
             )
             success_count += 1
         except:
-            logger.error("❌ Nu am putut instala Diffusers")
+            logger.error("❌ Could not install Diffusers")
             failure_count += 1
     
-    # Xformers pentru optimizare (opțional)
+    # Xformers for optimization (optional)
     if not args.no_xformers:
-        logger.info("🔄 Instalez xformers pentru optimizare...")
+        logger.info("🔄 Installing xformers for optimization...")
         try:
             run_command(
                 "pip install xformers==0.0.20", 
-                desc="Instalare xformers", 
+                desc="Installing xformers", 
                 shell=True,
                 check=False
             )
             success_count += 1
         except:
-            logger.warning("⚠️ Instalare xformers eșuată, încerc o versiune mai veche...")
+            logger.warning("⚠️ Xformers installation failed, trying an older version...")
             try:
                 run_command(
                     "pip install xformers==0.0.17", 
-                    desc="Instalare xformers (versiune alternativă)", 
+                    desc="Installing xformers (alternative version)", 
                     shell=True,
                     check=False
                 )
                 success_count += 1
             except:
-                logger.error("❌ Nu am putut instala xformers, dar continuăm fără el")
+                logger.error("❌ Could not install xformers, but continuing without it")
                 failure_count += 1
     
-    logger.info(f"📊 Instalare dependențe completă: {success_count} succese, {failure_count} eșecuri")
+    logger.info(f"📊 Dependencies installation complete: {success_count} successes, {failure_count} failures")
     return success_count, failure_count
 
 def copy_application_files():
-    """Copiază fișierele aplicației în directorul de instalare"""
-    logger.info(f"🔄 Copiez fișierele aplicației din {REPO_PATH} în {APP_DIR}...")
+    """Copy application files to installation directory"""
+    logger.info(f"🔄 Copying application files from {REPO_PATH} to {APP_DIR}...")
     
-    # Verificăm dacă app.py există în repo
+    # Check if app.py exists in the repo
     app_py_path = REPO_PATH / "app.py"
     if app_py_path.exists():
         shutil.copy(app_py_path, APP_DIR / "app.py")
-        logger.info("✅ app.py copiat")
+        logger.info("✅ app.py copied")
     else:
-        logger.warning(f"⚠️ app.py nu există în {REPO_PATH}")
+        logger.warning(f"⚠️ app.py doesn't exist in {REPO_PATH}")
         
-        # Căutăm app.py în toate subdirectoarele
+        # Search for app.py in all subdirectories
         found = False
         for root, dirs, files in os.walk(REPO_PATH):
             if "app.py" in files:
                 src_path = Path(root) / "app.py"
                 shutil.copy(src_path, APP_DIR / "app.py")
-                logger.info(f"✅ app.py găsit și copiat din {src_path}")
+                logger.info(f"✅ app.py found and copied from {src_path}")
                 found = True
                 break
         
         if not found:
-            # Dacă nu găsim app.py, căutăm un fișier Python care ar putea fi principal
+            # If no app.py found, look for a Python file that might be the main one
             py_files = list(REPO_PATH.glob("*.py"))
             if py_files:
                 main_py = py_files[0]
                 shutil.copy(main_py, APP_DIR / "app.py")
-                logger.info(f"✅ Am copiat {main_py} ca app.py")
+                logger.info(f"✅ Copied {main_py} as app.py")
             else:
-                logger.error("❌ Nu am găsit niciun fișier Python principal")
+                logger.error("❌ Could not find any main Python file")
 
-    # Verificăm și copiem runpod_utils.py dacă există
+    # Check and copy runpod_utils.py if it exists
     utils_path = REPO_PATH / "runpod_utils.py"
     if utils_path.exists():
         shutil.copy(utils_path, APP_DIR / "runpod_utils.py")
-        logger.info("✅ runpod_utils.py copiat")
+        logger.info("✅ runpod_utils.py copied")
     
-    # Copiem și alte fișiere necesare
+    # Copy other necessary files
     for file in ["requirements.txt", "README.md", "LICENSE"]:
         src_path = REPO_PATH / file
         if src_path.exists():
             shutil.copy(src_path, APP_DIR / file)
-            logger.info(f"✅ {file} copiat")
+            logger.info(f"✅ {file} copied")
 
 def create_fallback_app():
-    """Creează un fișier app.py minimal dacă nu există unul"""
+    """Create a minimal app.py file if one doesn't exist"""
     if not (APP_DIR / "app.py").exists():
-        logger.warning("⚠️ Nu am găsit app.py în repo, creez un fișier minimal")
+        logger.warning("⚠️ Could not find app.py in repo, creating a minimal file")
         
         minimal_app = """
 import os
@@ -445,30 +445,30 @@ import sys
 import gradio as gr
 import torch
 
-# Verificăm PyTorch
+# Check PyTorch
 print(f"PyTorch {torch.__version__}")
 if torch.cuda.is_available():
     print(f"CUDA: {torch.cuda.get_device_name(0)}")
 else:
-    print("CUDA nu este disponibil. Performanța va fi redusă.")
+    print("CUDA is not available. Performance will be reduced.")
 
-# Interfața minimală
+# Minimal interface
 def generate_image(prompt):
-    # Aici ar trebui să fie codul real
-    return f"Simulare generare imagine pentru: {prompt}"
+    # Real code would go here
+    return f"Simulating image generation for: {prompt}"
 
-# Creăm interfața Gradio
+# Create Gradio interface
 with gr.Blocks(title="FusionFrame Minimal") as demo:
-    gr.Markdown("# FusionFrame - Instalare minimală")
-    gr.Markdown("⚠️ Aceasta este o versiune minimală. Copiați app.py original în acest director.")
+    gr.Markdown("# FusionFrame - Minimal Installation")
+    gr.Markdown("⚠️ This is a minimal version. Copy the original app.py to this directory.")
     
     with gr.Row():
         with gr.Column():
             prompt = gr.Textbox(label="Prompt")
-            generate_btn = gr.Button("Generează")
+            generate_btn = gr.Button("Generate")
         
         with gr.Column():
-            output = gr.Textbox(label="Rezultat")
+            output = gr.Textbox(label="Result")
     
     generate_btn.click(generate_image, inputs=[prompt], outputs=[output])
 
@@ -477,165 +477,165 @@ if __name__ == "__main__":
 """
         with open(APP_DIR / "app.py", "w") as f:
             f.write(minimal_app)
-        logger.info("✅ App minimal creat")
+        logger.info("✅ Minimal app created")
 
 def create_startup_script():
-    """Creează script de pornire pentru aplicație"""
-    logger.info("🔄 Creez script de pornire...")
+    """Create startup script for the application"""
+    logger.info("🔄 Creating startup script...")
     
-    # Script bash pentru pornire
+    # Bash script for startup
     startup_script = f"""#!/bin/bash
-# Script de pornire FusionFrame
+# FusionFrame Startup Script
 
-# Setare variabile de mediu
+# Set environment variables
 export HF_HOME="{CACHE_DIR}"
 export NCCL_P2P_DISABLE=1
 export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
 
-# Mesaj de start
+# Start message
 echo "-----------------------------------"
-echo "🚀 Pornesc FusionFrame..."
-echo "📂 Director aplicație: {APP_DIR}"
-echo "🔗 Interfață web: http://localhost:{args.port}"
+echo "🚀 Starting FusionFrame..."
+echo "📂 Application directory: {APP_DIR}"
+echo "🔗 Web interface: http://localhost:{args.port}"
 echo "-----------------------------------"
 
-# Pornire aplicație
+# Start application
 cd {APP_DIR}
 python app_wrapper.py --port {args.port} {'--share' if args.shared else ''}
 """
     
-    # Salvăm și marcăm ca executabil
+    # Save and mark as executable
     start_script_path = APP_DIR / "start.sh"
     with open(start_script_path, "w") as f:
         f.write(startup_script)
     
     os.chmod(start_script_path, 0o755)
-    logger.info(f"✅ Script de pornire creat: {start_script_path}")
+    logger.info(f"✅ Startup script created: {start_script_path}")
     
-    # Script Python pentru pornire (alternativă)
+    # Python script for startup (alternative)
     py_script = f"""#!/usr/bin/env python3
 import os
 import subprocess
 import sys
 
-# Setare variabile de mediu
+# Set environment variables
 os.environ["HF_HOME"] = "{CACHE_DIR}"
 os.environ["NCCL_P2P_DISABLE"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
-# Schimbare director
+# Change directory
 os.chdir("{APP_DIR}")
 
-# Afișare mesaj de start
+# Display start message
 print("-----------------------------------")
-print("🚀 Pornesc FusionFrame...")
-print("📂 Director aplicație: {APP_DIR}")
-print("🔗 Interfață web: http://localhost:{args.port}")
+print("🚀 Starting FusionFrame...")
+print("📂 Application directory: {APP_DIR}")
+print("🔗 Web interface: http://localhost:{args.port}")
 print("-----------------------------------")
 
-# Pornire aplicație
+# Start application
 cmd = ["python", "app_wrapper.py", "--port", "{args.port}"]
-{'cmd.append("--share")' if args.shared else '# Fără share'}
+{'cmd.append("--share")' if args.shared else '# No share'}
 
 subprocess.run(cmd)
 """
     
-    # Salvăm și marcăm ca executabil
+    # Save and mark as executable
     py_script_path = APP_DIR / "start.py"
     with open(py_script_path, "w") as f:
         f.write(py_script)
     
     os.chmod(py_script_path, 0o755)
-    logger.info(f"✅ Script Python de pornire creat: {py_script_path}")
+    logger.info(f"✅ Python startup script created: {py_script_path}")
 
 def create_wrapper():
-    """Creează un wrapper pentru app.py care rezolvă problemele de compatibilitate"""
-    logger.info("🔄 Creez wrapper de compatibilitate pentru app.py...")
+    """Create a wrapper for app.py that fixes compatibility issues"""
+    logger.info("🔄 Creating compatibility wrapper for app.py...")
     
-    # Salvăm app.py original cu alt nume dacă există
+    # Save original app.py with different name if it exists
     app_path = APP_DIR / "app.py"
     if app_path.exists():
         shutil.copy(app_path, APP_DIR / "app_original.py")
     
-    # Script wrapper care importă corect
+    # Wrapper script that imports correctly
     wrapper_script = """#!/usr/bin/env python3
-# Wrapper pentru app.py care rezolvă probleme de compatibilitate CUDA/NCCL
+# Wrapper for app.py that fixes CUDA/NCCL compatibility issues
 
 import os
 import sys
 import argparse
 
-# Parsare argumente
+# Parse arguments
 parser = argparse.ArgumentParser(description="FusionFrame App Wrapper")
-parser.add_argument("--port", type=int, default=7860, help="Port pentru interfața web")
-parser.add_argument("--share", action="store_true", help="Permite accesul public")
+parser.add_argument("--port", type=int, default=7860, help="Port for web interface")
+parser.add_argument("--share", action="store_true", help="Allow public access")
 args = parser.parse_args()
 
-# Setare variabile de mediu esențiale pentru compatibilitate
+# Set essential environment variables for compatibility
 os.environ["NCCL_P2P_DISABLE"] = "1"
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
-# Asigură-te că directorul curent este în path
+# Make sure current directory is in path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Verificare PyTorch înainte de import pentru a evita crash-ul
+# Check PyTorch before importing to avoid crashes
 try:
-    # Încercăm să importăm torch
+    # Try to import torch
     import torch
-    print(f"PyTorch {torch.__version__} încărcat cu succes")
+    print(f"PyTorch {torch.__version__} loaded successfully")
     if torch.cuda.is_available():
-        print(f"CUDA disponibil: {torch.cuda.get_device_name(0)}")
+        print(f"CUDA available: {torch.cuda.get_device_name(0)}")
     else:
-        print("AVERTISMENT: CUDA nu este disponibil, aplicația va rula pe CPU (foarte lent)")
+        print("WARNING: CUDA is not available, application will run on CPU (very slow)")
 except ImportError as e:
-    print(f"Eroare la importul PyTorch: {e}")
-    print("Încercăm să reinstalăm PyTorch...")
+    print(f"Error importing PyTorch: {e}")
+    print("Trying to reinstall PyTorch...")
     import subprocess
     subprocess.run(["pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"])
     subprocess.run(["pip", "install", "torch==1.13.1", "torchvision", "torchaudio", 
                     "--index-url", "https://download.pytorch.org/whl/cu117"])
-    # Reîncercăm importul
+    # Try import again
     try:
         import torch
-        print(f"PyTorch reinstalat și încărcat: {torch.__version__}")
+        print(f"PyTorch reinstalled and loaded: {torch.__version__}")
     except ImportError as e:
-        print(f"Nu s-a putut instala PyTorch: {e}")
+        print(f"Could not install PyTorch: {e}")
         sys.exit(1)
 
-# Verificăm dacă există app_original.py
+# Check if app_original.py exists
 original_app = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_original.py")
 if os.path.exists(original_app):
-    print("Încărcăm aplicația originală...")
+    print("Loading original application...")
     try:
-        # Înlocuim argv pentru a transmite parametrii
+        # Replace argv to pass parameters
         sys.argv = [original_app]
         if args.port != 7860:
             sys.argv.extend(["--port", str(args.port)])
         if args.share:
             sys.argv.append("--share")
         
-        # Executăm codul din app_original.py
+        # Execute code from app_original.py
         with open(original_app) as f:
             code = compile(f.read(), original_app, 'exec')
             exec(code, globals())
     except Exception as e:
-        print(f"Eroare la pornirea aplicației originale: {e}")
+        print(f"Error starting original application: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
 else:
-    print("Eroare: Nu găsesc fișierul app_original.py")
+    print("Error: Cannot find app_original.py file")
     sys.exit(1)
 """
     
-    # Salvăm wrapper-ul ca app_wrapper.py
+    # Save wrapper as app_wrapper.py
     with open(APP_DIR / "app_wrapper.py", "w") as f:
         f.write(wrapper_script)
     
-    logger.info("✅ Wrapper de compatibilitate creat")
+    logger.info("✅ Compatibility wrapper created")
 
 def create_info_file():
-    """Creează un fișier JSON cu informații despre instalare"""
+    """Create a JSON file with installation information"""
     info = {
         "install_dir": str(APP_DIR),
         "cache_dir": str(CACHE_DIR),
@@ -651,70 +651,70 @@ def create_info_file():
     with open(info_path, "w") as f:
         json.dump(info, f, indent=2)
     
-    logger.info(f"✅ Informații instalare salvate în: {info_path}")
+    logger.info(f"✅ Installation info saved to: {info_path}")
 
 def main():
-    """Funcția principală de instalare"""
+    """Main installation function"""
     start_time = time.time()
-    logger.info(f"🚀 Începere instalare FusionFrame pe RunPod")
-    logger.info(f"📂 Director instalare: {APP_DIR}")
-    logger.info(f"📂 Director repo: {REPO_PATH}")
+    logger.info(f"🚀 Starting FusionFrame installation on RunPod")
+    logger.info(f"📂 Installation directory: {APP_DIR}")
+    logger.info(f"📂 Repository directory: {REPO_PATH}")
     
-    # Creăm directoarele
+    # Create directories
     setup_directories()
     
-    # Verificăm GPU-ul
+    # Check GPU
     has_gpu = check_gpu()
     
-    # Corectăm variabilele de mediu CUDA
+    # Fix CUDA environment variables
     if has_gpu:
         fix_cuda_environment()
     
-    # Instalăm PyTorch
+    # Install PyTorch
     install_pytorch(args.cuda_version, args.torch_version, fix_cuda=args.fix_cuda)
     
-    # Instalăm dependențele
+    # Install dependencies
     success_count, failure_count = install_dependencies()
     
-    # Copiem fișierele aplicației
+    # Copy application files
     copy_application_files()
     
-    # Creăm un app.py minimal dacă nu există
+    # Create minimal app.py if it doesn't exist
     create_fallback_app()
     
-    # Creăm wrapper cu fix-uri pentru CUDA
+    # Create wrapper with CUDA fixes
     create_wrapper()
     
-    # Creăm script de pornire
+    # Create startup script
     create_startup_script()
     
-    # Creăm fișierul cu informații
+    # Create info file
     create_info_file()
     
-    # Afișăm sumar
+    # Display summary
     elapsed_time = time.time() - start_time
-    logger.info(f"✨ Instalare completă în {elapsed_time:.1f} secunde!")
-    logger.info(f"📋 Sumar instalare:")
-    logger.info(f"   - Director instalare: {APP_DIR}")
-    logger.info(f"   - Director cache: {CACHE_DIR}")
-    logger.info(f"   - Pachete instalate cu succes: {success_count}")
+    logger.info(f"✨ Installation complete in {elapsed_time:.1f} seconds!")
+    logger.info(f"📋 Installation summary:")
+    logger.info(f"   - Installation directory: {APP_DIR}")
+    logger.info(f"   - Cache directory: {CACHE_DIR}")
+    logger.info(f"   - Successfully installed packages: {success_count}")
     if failure_count > 0:
-        logger.warning(f"   - Pachete cu probleme: {failure_count} (unele pot fi opționale)")
-    logger.info(f"   - Pentru pornire, rulați: {APP_DIR}/start.sh")
-    logger.info(f"   - Interfața web va fi disponibilă la: http://localhost:{args.port}")
+        logger.warning(f"   - Packages with issues: {failure_count} (some may be optional)")
+    logger.info(f"   - To start, run: {APP_DIR}/start.sh")
+    logger.info(f"   - Web interface will be available at: http://localhost:{args.port}")
     if args.shared:
-        logger.info(f"   - Link public va fi afișat la pornire")
+        logger.info(f"   - Public link will be displayed at startup")
     
-    logger.info(f"🎉 Instalare finalizată cu succes!")
+    logger.info(f"🎉 Installation successfully completed!")
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        logger.warning("⚠️ Instalare întreruptă de utilizator")
+        logger.warning("⚠️ Installation interrupted by user")
         sys.exit(1)
     except Exception as e:
-        logger.error(f"❌ Eroare în timpul instalării: {e}")
+        logger.error(f"❌ Error during installation: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
