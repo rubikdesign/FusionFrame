@@ -648,7 +648,7 @@ def load_model(
 
         # ─ IP-Adapter (opţional) ─
         if ip_adapter_name != "None":
-            if progress: progress(0.85, desc="Loading IP-Adapter…")
+             if progress is not None: progress(0.85, desc="Loading IP-Adapter…")
             ip_adapter = load_ip_adapter(ip_adapter_name, pipe, is_xl, progress)
             loaded_components["ip_adapter"]       = ip_adapter
             loaded_components["ip_adapter_name"]  = ip_adapter_name
