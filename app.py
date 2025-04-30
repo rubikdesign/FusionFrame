@@ -436,54 +436,101 @@ def load_controlnet(controlnet_name, model_type="SD", progress=None):
         logger.error(error_msg)
         return None
 
-def load_ip_adapter(ip_adapter_name, base_model_path, is_xl=False, progress=None):
-    """Load IP-Adapter if specified"""
-    if not IP_ADAPTER_AVAILABLE or ip_adapter_name == "None" or ip_adapter_name is None:
+def load_ip_adapter(ip_adapter_name, sd_pipe, is_xl: bool = False, progress=None):
+    """
+    Attach an IP-Adapter to an existent Stable-Diffusion pipeline.
+
+    Parameters
+    ----------
+    ip_adapter_name : str
+        Cheia din IP_ADAPTER_MODELS care identifică adapterul dorit.
+    sd_pipe : diffusers.DiffusionPipeline
+        Pipeline-ul deja încărcat (StableDiffusionXLPipeline, SDPipeline etc.).
+    is_xl : bool, optional
+        True dacă pipeline-ul este SDXL; alege varianta IPAdapterPlusXL. (default False)
+    progress : gradio.Progress or None, optional
+        Obiect Gradio pentru feedback în UI.
+
+    Returns
+    -------
+    ip_adapter : IPAdapterPlus | IPAdapterPlusXL | None
+        Instanța IP-Adapter gata de folosit sau None dacă nu s-a putut încărca.
+    """
+    # 1. verificări rapide ----------------------------------------------------
+    if (
+        not IP_ADAPTER_AVAILABLE
+        or not ip_adapter_name
+        or ip_adapter_name == "None"
+    ):
         return None
-    
-    adapter_config = IP_ADAPTER_MODELS.get(ip_adapter_name)
-    if adapter_config is None:
+
+    adapter_cfg = IP_ADAPTER_MODELS.get(ip_adapter_name)
+    if adapter_cfg is None:
         return None
-    
+
     update_status(f"Loading IP-Adapter: {ip_adapter_name}")
     if progress is not None:
-        progress(0.1, desc=f"Loading IP-Adapter: {ip_adapter_name}...")
-    
+        progress(0.1, desc=f"Loading IP-Adapter: {ip_adapter_name}…")
+
+    # 2. pregătim căile local-cache ------------------------------------------
     cache_path = os.path.join(IPADAPTER_DIR, ip_adapter_name.replace(" ", "_").lower())
     os.makedirs(cache_path, exist_ok=True)
-    
+    tokens = 16 if "vit-h" in adapter_cfg["weight_name"] else 4
+
+
+
     try:
+        # ――― 1. Download the checkpoint ―――
+        ip_ckpt_local = hf_hub_download(
+            repo_id   = adapter_cfg["model_id"],
+            filename  = adapter_cfg["weight_name"],
+            subfolder = adapter_cfg["subfolder"],
+            cache_dir = cache_path,
+            resume_download=True,
+        )
+
+        # ――― 2. Download the *whole* image-encoder folder ―――
+        repo_local = snapshot_download(                 # <── new
+            repo_id               = adapter_cfg["model_id"],
+            local_dir             = cache_path,
+            local_dir_use_symlinks=False,
+            resume_download       = True,
+            allow_patterns        = "models/image_encoder/*",
+        )
+        image_encoder_path = os.path.join(
+            repo_local, "models", "image_encoder")      # <── new
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # ――― 3. Instantiate ―――
         if is_xl:
             ip_adapter = IPAdapterPlusXL(
-                base_model_path,
-                adapter_config["model_id"],
-                adapter_config["subfolder"],
-                adapter_config["weight_name"],
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                cache_dir=cache_path
+                sd_pipe            = sd_pipe,
+                image_encoder_path = image_encoder_path,  # <── fixed
+                ip_ckpt            = ip_ckpt_local,
+                device             = device,
+                num_tokens         = tokens,
             )
         else:
             ip_adapter = IPAdapterPlus(
-                base_model_path,
-                adapter_config["model_id"],
-                adapter_config["subfolder"],
-                adapter_config["weight_name"],
-                device="cuda" if torch.cuda.is_available() else "cpu",
-                cache_dir=cache_path
+                sd_pipe            = sd_pipe,
+                image_encoder_path = image_encoder_path,  # <── fixed
+                ip_ckpt            = ip_ckpt_local,
+                device             = device,
             )
-            
+
         if progress is not None:
-            progress(0.9, desc=f"IP-Adapter loaded successfully")
-            
+            progress(0.9, desc="IP-Adapter loaded successfully")
         update_status(f"IP-Adapter {ip_adapter_name} loaded successfully")
         return ip_adapter
+
     except Exception as e:
         error_msg = f"Error loading IP-Adapter: {e}"
         update_status(error_msg)
         logger.error(error_msg)
-        import traceback
-        traceback.print_exc()
+        import traceback; traceback.print_exc()
         return None
+
 
 def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default", 
                controlnet_name="None", ip_adapter_name="None", force_reload=False,
@@ -617,7 +664,7 @@ def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default",
             progress(0.85, desc=f"Loading IP-Adapter...")
             
         if ip_adapter_name != "None":
-            ip_adapter = load_ip_adapter(ip_adapter_name, model_id, is_xl, progress)
+            ip_adapter = load_ip_adapter(ip_adapter_name, pipe, is_xl, progress)
             loaded_components["ip_adapter"] = ip_adapter
             loaded_components["ip_adapter_name"] = ip_adapter_name
         
@@ -851,7 +898,7 @@ def generate_images(
     controlnet_conditioning_scale,
     ip_adapter_name,
     ip_adapter_scale,
-    denoising_strength,
+    denoising_strength,          # ← rămâne în UI dar NU îl mai trimitem direct
     num_inference_steps,
     guidance_scale,
     image_width,
@@ -862,231 +909,121 @@ def generate_images(
     seed,
     progress=gr.Progress()
 ):
-    """Generate images based on the provided inputs with visible progress"""
-    # Debug output to console and log file
-    print(f"GENERATE BUTTON CLICKED! Model: {model_name}, Seed: {seed}")
-    logger.info(f"Generate button clicked - starting generation with model {model_name}")
-    with open(os.path.join(LOGS_DIR, "generate_button.log"), "a") as f:
-        f.write(f"{time.time()}: Generate button clicked\n")
-        f.write(f"Model: {model_name}\n")
-        f.write(f"Person image: {person_image is not None}\n")
-        f.write(f"Seed: {seed}\n")
-        f.write("-" * 50 + "\n")
-    
-    try:
-        # Track overall progress
-        progress(0, desc="Initializing...")
-        update_status("Starting image generation...")
-        
-        # Print model info to debug downloaded models
-        logger.info(f"Checking model directories:")
-        logger.info(f"MODELS_DIR: {os.listdir(MODELS_DIR) if os.path.exists(MODELS_DIR) else 'Directory does not exist'}")
-        logger.info(f"CACHE_DIR: {os.listdir(CACHE_DIR) if os.path.exists(CACHE_DIR) else 'Directory does not exist'}")
-        
-        # Load the model with progress updates
-        pipe = load_model(
-            model_name, 
-            scheduler_name=scheduler_name, 
-            vae_name=vae_name, 
-            controlnet_name=controlnet_type,
-            ip_adapter_name=ip_adapter_name,
-            progress=progress
+    """High-level generation with ControlNet + IP-Adapter support."""
+    logger.info(f"Generate: model={model_name} seed={seed}")
+
+    # ------------------------------ 0. setup ---------------------------------
+    progress(0, desc="Init");  update_status("Initializing…")
+    pipe = load_model(model_name, scheduler_name, vae_name,
+                      controlnet_name=controlnet_type,
+                      ip_adapter_name=ip_adapter_name,
+                      progress=progress)
+    if pipe is None:
+        err = "Pipeline load failed."
+        return [], seed, err
+
+    if seed == -1:
+        seed = torch.randint(0, 2**32, (1,)).item()
+    generator = torch.Generator("cuda").manual_seed(seed)
+    update_status(f"Seed: {seed}")
+
+    # ------------------------------ 1. images -------------------------------
+    person_img     = prepare_image(person_image)     if person_image     else None
+    clothing_img   = prepare_image(clothing_image)   if clothing_image   else None
+    background_img = prepare_image(background_image) if background_image else None
+
+    # ------------------------------ 2. prompt -------------------------------
+    base_prompt = positive_prompt.strip() if positive_prompt else ""
+    if   person_img and clothing_img and background_img:
+        prompt = f"{base_prompt}, person wearing the clothing, in the background scene"
+    elif person_img and clothing_img:
+        prompt = f"{base_prompt}, person wearing the clothing"
+    elif person_img and background_img:
+        prompt = f"{base_prompt}, person in the background scene"
+    elif person_img:
+        prompt = f"{base_prompt}, person"
+    else:
+        prompt = base_prompt
+    update_status("Prompt prepared")
+
+    # ------------------------------ 3. LoRAs --------------------------------
+    for name, wt in [
+        (lora1, lora1_weight), (lora2, lora2_weight), (lora3, lora3_weight),
+        (lora4, lora4_weight), (lora5, lora5_weight)]:
+        if name and name != "None":
+            lp = lora_files.get(name)
+            if lp: pipe = load_lora_weights(pipe, lp, wt)
+
+    # ------------------------------ 4. ControlNet ---------------------------
+    controlnet_image = None
+    if controlnet_type != "None" and person_img is not None:
+        controlnet_image = generate_controlnet_conditioning(
+            person_img, controlnet_type, progress)
+
+    # ------------------------------ 5. IP-Adapter ---------------------------
+    reference_image = None
+    if ip_adapter_name != "None" and loaded_components["ip_adapter"]:
+        if   person_img:     reference_image = person_img
+        elif clothing_img:   reference_image = clothing_img
+        elif background_img: reference_image = background_img
+    ip_adapter = loaded_components.get("ip_adapter")
+
+    # ------------------------------ 6. loop ---------------------------------
+    outputs = []
+    for idx in range(num_outputs):
+        progress(0.6 + 0.3*idx/num_outputs,
+                 desc=f"Generating {idx+1}/{num_outputs}")
+        gen_params = dict(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
         )
-        
-        if pipe is None:
-            error_msg = "Failed to load model. Check logs for details."
-            update_status(error_msg)
-            return [], seed, error_msg
-        
-        # Apply seed for reproducibility
-        progress(0.35, desc="Setting up generation parameters...")
-        if seed == -1:
-            seed = torch.randint(0, 2**32, (1,)).item()
-            update_status(f"Using random seed: {seed}")
-        else:
-            update_status(f"Using specified seed: {seed}")
-        
-        generator = torch.Generator("cuda").manual_seed(seed)
-        
-        # Prepare inputs
-        has_person = person_image is not None
-        has_clothing = clothing_image is not None
-        has_background = background_image is not None
-        
-        # Convert uploaded images to PIL and prepare them
-        progress(0.4, desc="Processing input images...")
-        update_status("Processing input images...")
-        
-        person_img = prepare_image(person_image) if has_person else None
-        clothing_img = prepare_image(clothing_image) if has_clothing else None
-        background_img = prepare_image(background_image) if has_background else None
-        
-        # Enhanced prompt based on inputs
-        base_prompt = positive_prompt.strip() if positive_prompt else ""
-        
-        # Add more context based on available images
-        if has_person and has_clothing and has_background:
-            enhanced_prompt = f"{base_prompt}, person wearing the clothing, in the background scene"
-        elif has_person and has_clothing:
-            enhanced_prompt = f"{base_prompt}, person wearing the clothing"
-        elif has_person and has_background:
-            enhanced_prompt = f"{base_prompt}, person in the background scene"
-        elif has_person:
-            enhanced_prompt = f"{base_prompt}, person"
-        else:
-            enhanced_prompt = base_prompt
-        
-        logger.info(f"Enhanced prompt: {enhanced_prompt}")
-        logger.info(f"Negative prompt: {negative_prompt}")
-        update_status(f"Using prompt: {enhanced_prompt}")
-        
-        # Load LoRAs
-        progress(0.45, desc="Loading LoRAs...")
-        loras = [
-            (lora1, lora1_weight),
-            (lora2, lora2_weight),
-            (lora3, lora3_weight),
-            (lora4, lora4_weight),
-            (lora5, lora5_weight)
-        ]
-        
-        # Apply each selected LoRA
-        for lora_name, lora_weight in loras:
-            if lora_name and lora_name != "None":
-                lora_path = lora_files.get(lora_name)
-                if lora_path:
-                    pipe = load_lora_weights(pipe, lora_path, lora_weight)
-        
-        # Prepare ControlNet input if needed
-        progress(0.5, desc="Preparing ControlNet conditioning...")
-        controlnet_image = None
-        if controlnet_type != "None" and person_img is not None:
-            update_status(f"Generating {controlnet_type} conditioning...")
-            controlnet_image = generate_controlnet_conditioning(person_img, controlnet_type, progress)
-            if controlnet_image:
-                update_status(f"ControlNet conditioning generated successfully")
-            else:
-                update_status(f"Failed to generate ControlNet conditioning, proceeding without it")
-        
-        # Prepare IP-Adapter input if needed
-        if ip_adapter_name != "None" and loaded_components["ip_adapter"] is not None:
-            progress(0.55, desc="Preparing IP-Adapter...")
-            update_status(f"Setting up IP-Adapter with scale {ip_adapter_scale}...")
-            
-            ip_adapter = loaded_components["ip_adapter"]
-            
-            # Determine which image to use for IP-Adapter
-            reference_image = None
-            if has_person:
-                reference_image = person_img
-                update_status("Using person image for IP-Adapter")
-            elif has_clothing:
-                reference_image = clothing_img
-                update_status("Using clothing image for IP-Adapter")
-            elif has_background:
-                reference_image = background_img
-                update_status("Using background image for IP-Adapter")
-            
-            if reference_image:
-                ip_adapter.set_ip_adapter_scale(ip_adapter_scale)
-        
-        # Generate images
-        progress(0.6, desc="Generating images...")
-        update_status(f"Starting generation of {num_outputs} images...")
-        
-        outputs = []
-        
-        # We'll use img2img if any of the input images are provided
-        use_img2img = has_person or has_clothing or has_background
-        
-        # Determine if we're using an XL model
-        is_xl = "XL" in model_name
-        
-        for i in range(num_outputs):
-            progress(0.6 + (0.3 * i / num_outputs), desc=f"Generating image {i+1}/{num_outputs}")
-            update_status(f"Generating image {i+1}/{num_outputs}...")
-            
-            # Configure generation parameters
-            generation_params = {
-                "prompt": enhanced_prompt,
-                "negative_prompt": negative_prompt,
-                "num_inference_steps": num_inference_steps,
-                "guidance_scale": guidance_scale,
-                "generator": generator,
-            }
-            
-            # Add width and height for text-to-image
-            if not use_img2img:
-                generation_params.update({
-                    "width": image_width,
-                    "height": image_height,
-                })
-            
-            # Add ControlNet parameters if applicable
-            if controlnet_type != "None" and controlnet_image is not None:
-                generation_params.update({
-                    "image": controlnet_image,
-                    "controlnet_conditioning_scale": controlnet_conditioning_scale,
-                })
-            
-            # Add IP-Adapter parameters if applicable
-            if ip_adapter_name != "None" and reference_image is not None and loaded_components["ip_adapter"] is not None:
-                # IP-Adapter generates inside the modified pipeline
-                update_status(f"Using IP-Adapter for generation...")
-                try:
-                    result = ip_adapter.generate(
-                        pil_image=reference_image,
-                        prompt=enhanced_prompt,
-                        negative_prompt=negative_prompt,
-                        num_samples=1,
-                        num_inference_steps=num_inference_steps,
-                        guidance_scale=guidance_scale,
-                        width=image_width,
-                        height=image_height,
-                        generator=generator,
-                    )
-                    outputs.append(result[0])
-                    continue
-                except Exception as e:
-                    error_msg = f"Error using IP-Adapter: {e}. Falling back to standard generation."
-                    update_status(error_msg)
-                    logger.error(error_msg)
-            
-            # Standard generation when no IP-Adapter is used or IP-Adapter failed
-            update_status(f"Running standard diffusion process...")
-            result = pipe(**generation_params)
-            outputs.extend(result.images)
-        
-        # Save generated images
-        progress(0.95, desc="Saving generated images...")
-        update_status("Saving generated images...")
-        
-        saved_paths = []
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        for i, img in enumerate(outputs):
-            output_path = os.path.join(OUTPUT_DIR, f"generated_{timestamp}_{i}_{seed}.png")
-            img.save(output_path)
-            saved_paths.append(output_path)
-            logger.info(f"Saved image to {output_path}")
-        
-        # Clear LoRAs from pipeline for next run
-        progress(0.99, desc="Cleaning up...")
-        update_status("Cleaning up...")
-        
-        if hasattr(pipe, "unload_lora_weights"):
-            pipe.unload_lora_weights()
-        
-        success_message = f"Successfully generated {len(saved_paths)} images with seed {seed}"
-        update_status(success_message)
-        return outputs, seed, success_message
-        
-    except Exception as e:
-        error_msg = f"Error generating images: {e}"
-        update_status(error_msg)
-        logger.error(error_msg)
-        import traceback
-        traceback.print_exc()
-        return [], seed, error_msg
+
+        # text-to-img width/height
+        if not person_img and not clothing_img and not background_img:
+            gen_params.update(width=image_width, height=image_height)
+
+        # ControlNet
+        if controlnet_image is not None:
+            gen_params.update(
+                image=[controlnet_image],
+                controlnet_conditioning_scale=controlnet_conditioning_scale
+            )
+
+        # ---------- try IP-Adapter first ----------
+        if ip_adapter and reference_image is not None:
+            try:
+                res = ip_adapter.generate(
+                    pil_image      = reference_image,
+                    prompt         = prompt,
+                    negative_prompt=negative_prompt,
+                    num_samples    = 1,
+                    num_inference_steps=num_inference_steps,
+                    guidance_scale = guidance_scale,
+                    width          = image_width,
+                    height         = image_height,
+                    scale          = ip_adapter_scale  # ← param. corect
+                )
+                outputs.append(res[0]);  continue
+            except Exception as e:
+                logger.error(f"IP-Adapter failed: {e}; falling back.")
+
+        # ---------- standard diffusion ----------
+        img_out = pipe(**gen_params).images[0]
+        outputs.append(img_out)
+
+    # ------------------------------ 7. save ---------------------------------
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    for i, im in enumerate(outputs):
+        im.save(os.path.join(OUTPUT_DIR, f"gen_{ts}_{i}_{seed}.png"))
+
+    msg = f"Generated {len(outputs)} image(s) with seed {seed}"
+    update_status(msg);  progress(1, desc="Done")
+    return outputs, seed, msg
+
+
 
 def test_generation():
     """Generate a test image to verify backend is working"""
