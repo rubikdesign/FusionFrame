@@ -14,6 +14,7 @@ import random
 from typing import List, Dict, Tuple, Optional, Union, Any
 import logging
 import tempfile
+import argparse
 
 # Set up basic logging with more detailed format
 logging.basicConfig(
@@ -97,7 +98,9 @@ try:
         AutoProcessor, 
         CLIPVisionModelWithProjection
     )
-    from huggingface_hub import HfFolder, snapshot_download
+    
+    # Fixed huggingface_hub imports using new API - removed cached_download
+    from huggingface_hub import snapshot_download, hf_hub_download
     
     # Configure huggingface cache location
     os.environ['HF_HOME'] = CACHE_DIR
@@ -105,9 +108,12 @@ try:
 except ImportError as e:
     logger.error(f"Error importing AI dependencies: {e}")
     logger.error("Installing missing dependencies...")
+    
+    # Fix huggingface_hub first to ensure proper imports
+    os.system("pip install huggingface_hub>=0.19.4")
+    
     # Auto-install required packages
     os.system("pip install diffusers==0.21.4 transformers==4.30.2 accelerate==0.20.3 safetensors==0.3.1")
-    os.system("pip install huggingface_hub==0.16.4")
     
     # Retry imports
     try:
@@ -133,6 +139,10 @@ except ImportError as e:
             AutoProcessor, 
             CLIPVisionModelWithProjection
         )
+        
+        # Fixed huggingface_hub imports using new API
+        from huggingface_hub import snapshot_download, hf_hub_download
+        
         logger.info("Successfully installed and imported AI frameworks")
     except ImportError as e:
         logger.error(f"Critical error importing AI dependencies after installation: {e}")
@@ -1468,7 +1478,7 @@ def download_default_models():
         
         update_status(f"Starting download of default models...")
         
-        # Download default model
+# Download default model
         update_status(f"Downloading default model: {DEFAULT_MODEL}")
         model_path = snapshot_download(
             repo_id=default_model_id,
