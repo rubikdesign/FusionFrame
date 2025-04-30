@@ -613,7 +613,7 @@ def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default",
             pipe.enable_model_cpu_offload()
         
         # Load IP-Adapter if specified
-        if ip_adapter_name != "None" and progress:
+        if ip_adapter_name != "None" and progress is not None:
             progress(0.85, desc=f"Loading IP-Adapter...")
             
         if ip_adapter_name != "None":
