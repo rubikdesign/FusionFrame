@@ -65,7 +65,8 @@ MODEL_DIR = APP_DIR / "models"
 # Required packages with fixed versions and alternatives
 # Format: [(package, is_essential, alternatives)]
 PACKAGES = [
-    ("huggingface_hub==0.16.4", True, ["huggingface_hub==0.15.1"]),
+    # Changed huggingface_hub to a newer version to fix import errors
+    ("huggingface_hub==0.19.4", True, ["huggingface_hub==0.19.3", "huggingface_hub==0.18.1"]),
     ("transformers==4.30.2", True, ["transformers==4.29.2"]),
     ("accelerate==0.20.3", True, ["accelerate==0.19.0"]),
     ("safetensors==0.3.1", True, ["safetensors==0.3.0"]), 
@@ -78,8 +79,8 @@ PACKAGES = [
     ("opencv-python==4.7.0.72", False, ["opencv-python==4.6.0.66", "opencv-python"]),
     ("controlnet-aux==0.0.6", False, ["controlnet-aux==0.0.5", "controlnet-aux"]),
     ("timm==0.9.2", False, ["timm==0.6.12", "timm"]),
-    # mediapipe is problematic on RunPod - try alternative versions
-    ("mediapipe==0.10.0", False, ["mediapipe==0.9.0.1", "mediapipe==0.8.10", ""]),
+    # Using newest mediapipe version to avoid version errors
+    ("mediapipe==0.10.8", False, ["mediapipe==0.10.5", ""]),
     ("bitsandbytes==0.35.4", False, ["bitsandbytes", ""]),
 ]
 
@@ -389,95 +390,154 @@ def install_dependencies():
     logger.info(f"📊 Dependencies installation complete: {success_count} successes, {failure_count} failures")
     return success_count, failure_count
 
-def copy_application_files():
-    """Copy application files to installation directory"""
-    logger.info(f"🔄 Copying application files from {REPO_PATH} to {APP_DIR}...")
+def backup_application_files():
+    """Backup original application files before modification"""
+    logger.info(f"🔄 Backing up application files...")
     
-    # Check if app.py exists in the repo
+    # Check if app.py exists in the current directory
     app_py_path = REPO_PATH / "app.py"
     if app_py_path.exists():
-        shutil.copy(app_py_path, APP_DIR / "app.py")
-        logger.info("✅ app.py copied")
+        # Create backup if it doesn't exist
+        backup_path = APP_DIR / "app_original.py"
+        if not backup_path.exists():
+            try:
+                shutil.copy(app_py_path, backup_path)
+                logger.info(f"✅ Created backup of app.py as app_original.py")
+            except Exception as e:
+                logger.error(f"❌ Error creating backup: {e}")
     else:
-        logger.warning(f"⚠️ app.py doesn't exist in {REPO_PATH}")
-        
-        # Search for app.py in all subdirectories
-        found = False
-        for root, dirs, files in os.walk(REPO_PATH):
-            if "app.py" in files:
-                src_path = Path(root) / "app.py"
-                shutil.copy(src_path, APP_DIR / "app.py")
-                logger.info(f"✅ app.py found and copied from {src_path}")
-                found = True
-                break
-        
-        if not found:
-            # If no app.py found, look for a Python file that might be the main one
-            py_files = list(REPO_PATH.glob("*.py"))
-            if py_files:
-                main_py = py_files[0]
-                shutil.copy(main_py, APP_DIR / "app.py")
-                logger.info(f"✅ Copied {main_py} as app.py")
-            else:
-                logger.error("❌ Could not find any main Python file")
+        logger.warning(f"⚠️ app.py doesn't exist in {REPO_PATH}, cannot create backup")
 
-    # Check and copy runpod_utils.py if it exists
-    utils_path = REPO_PATH / "runpod_utils.py"
-    if utils_path.exists():
-        shutil.copy(utils_path, APP_DIR / "runpod_utils.py")
-        logger.info("✅ runpod_utils.py copied")
+def create_wrapper():
+    """Create a wrapper for app.py that fixes compatibility issues"""
+    logger.info("🔄 Creating compatibility wrapper for app.py...")
     
-    # Copy other necessary files
-    for file in ["requirements.txt", "README.md", "LICENSE"]:
-        src_path = REPO_PATH / file
-        if src_path.exists():
-            shutil.copy(src_path, APP_DIR / file)
-            logger.info(f"✅ {file} copied")
+    # Save original app.py with different name if it exists
+    app_path = REPO_PATH / "app.py"
+    backup_path = APP_DIR / "app_original.py"
+    
+    # If no backup exists, create one
+    if app_path.exists() and not backup_path.exists():
+        try:
+            shutil.copy(app_path, backup_path)
+            logger.info(f"✅ Created backup of app.py as app_original.py")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not create backup: {e}")
+    
+    # Wrapper script that imports correctly
+    wrapper_script = """#!/usr/bin/env python3
+# Wrapper for app.py that fixes CUDA/NCCL compatibility issues
 
-def create_fallback_app():
-    """Create a minimal app.py file if one doesn't exist"""
-    if not (APP_DIR / "app.py").exists():
-        logger.warning("⚠️ Could not find app.py in repo, creating a minimal file")
-        
-        minimal_app = """
 import os
 import sys
-import gradio as gr
-import torch
+import argparse
 
-# Check PyTorch
-print(f"PyTorch {torch.__version__}")
-if torch.cuda.is_available():
-    print(f"CUDA: {torch.cuda.get_device_name(0)}")
-else:
-    print("CUDA is not available. Performance will be reduced.")
+# Parse arguments
+parser = argparse.ArgumentParser(description="FusionFrame App Wrapper")
+parser.add_argument("--port", type=int, default=7860, help="Port for web interface")
+parser.add_argument("--share", action="store_true", help="Allow public access")
+parser.add_argument("--download-default", action="store_true", help="Download default models")
+parser.add_argument("--test-installation", action="store_true", help="Test installation")
+args = parser.parse_args()
 
-# Minimal interface
-def generate_image(prompt):
-    # Real code would go here
-    return f"Simulating image generation for: {prompt}"
+# Set essential environment variables for compatibility
+os.environ["NCCL_P2P_DISABLE"] = "1"
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
 
-# Create Gradio interface
-with gr.Blocks(title="FusionFrame Minimal") as demo:
-    gr.Markdown("# FusionFrame - Minimal Installation")
-    gr.Markdown("⚠️ This is a minimal version. Copy the original app.py to this directory.")
+# Make sure current directory is in path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Check PyTorch before importing to avoid crashes
+try:
+    # Try to import torch
+    import torch
+    print(f"PyTorch {torch.__version__} loaded successfully")
+    if torch.cuda.is_available():
+        print(f"CUDA available: {torch.cuda.get_device_name(0)}")
+    else:
+        print("WARNING: CUDA is not available, application will run on CPU (very slow)")
+except ImportError as e:
+    print(f"Error importing PyTorch: {e}")
+    print("Trying to reinstall PyTorch...")
+    import subprocess
+    subprocess.run(["pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"])
+    subprocess.run(["pip", "install", "torch==2.0.1", "torchvision", "torchaudio", 
+                    "--index-url", "https://download.pytorch.org/whl/cu118"])
+    # Try import again
+    try:
+        import torch
+        print(f"PyTorch reinstalled and loaded: {torch.__version__}")
+    except ImportError as e:
+        print(f"Could not install PyTorch: {e}")
+        sys.exit(1)
+
+# First try to import from app.py directly
+try:
+    print("Attempting to load app.py directly...")
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from app import create_interface, download_default_models, install_test_model
     
-    with gr.Row():
-        with gr.Column():
-            prompt = gr.Textbox(label="Prompt")
-            generate_btn = gr.Button("Generate")
+    # Create and start the app
+    app = create_interface()
+    
+    # Handle command line arguments
+    if args.download_default:
+        print("Downloading default models...")
+        download_default_models()
         
-        with gr.Column():
-            output = gr.Textbox(label="Result")
+    if args.test_installation:
+        print("Testing installation...")
+        install_test_model()
     
-    generate_btn.click(generate_image, inputs=[prompt], outputs=[output])
-
-if __name__ == "__main__":
-    demo.launch(share=True)
+    # Launch the app
+    app.queue()
+    app.launch(
+        server_name="0.0.0.0",
+        server_port=args.port,
+        share=args.share,
+        debug=False,
+        enable_queue=True,
+        max_threads=4
+    )
+except Exception as e:
+    print(f"Error loading app.py directly: {e}")
+    print("Trying backup method using app_original.py...")
+    
+    # Check if app_original.py exists
+    original_app = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_original.py")
+    if os.path.exists(original_app):
+        print("Loading from app_original.py...")
+        try:
+            # Replace argv to pass parameters
+            sys.argv = [original_app]
+            if args.port != 7860:
+                sys.argv.extend(["--port", str(args.port)])
+            if args.share:
+                sys.argv.append("--share")
+            if args.download_default:
+                sys.argv.append("--download-default")
+            if args.test_installation:
+                sys.argv.append("--test-installation")
+            
+            # Execute code from app_original.py
+            with open(original_app) as f:
+                code = compile(f.read(), original_app, 'exec')
+                exec(code, globals())
+        except Exception as e:
+            print(f"Error starting original application: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
+    else:
+        print("Error: Cannot find app_original.py file")
+        sys.exit(1)
 """
-        with open(APP_DIR / "app.py", "w") as f:
-            f.write(minimal_app)
-        logger.info("✅ Minimal app created")
+    
+    # Save wrapper as app_wrapper.py
+    with open(APP_DIR / "app_wrapper.py", "w") as f:
+        f.write(wrapper_script)
+    
+    logger.info("✅ Compatibility wrapper created")
 
 def create_startup_script():
     """Create startup script for the application"""
@@ -548,92 +608,6 @@ subprocess.run(cmd)
     os.chmod(py_script_path, 0o755)
     logger.info(f"✅ Python startup script created: {py_script_path}")
 
-def create_wrapper():
-    """Create a wrapper for app.py that fixes compatibility issues"""
-    logger.info("🔄 Creating compatibility wrapper for app.py...")
-    
-    # Save original app.py with different name if it exists
-    app_path = APP_DIR / "app.py"
-    if app_path.exists():
-        shutil.copy(app_path, APP_DIR / "app_original.py")
-    
-    # Wrapper script that imports correctly
-    wrapper_script = """#!/usr/bin/env python3
-# Wrapper for app.py that fixes CUDA/NCCL compatibility issues
-
-import os
-import sys
-import argparse
-
-# Parse arguments
-parser = argparse.ArgumentParser(description="FusionFrame App Wrapper")
-parser.add_argument("--port", type=int, default=7860, help="Port for web interface")
-parser.add_argument("--share", action="store_true", help="Allow public access")
-args = parser.parse_args()
-
-# Set essential environment variables for compatibility
-os.environ["NCCL_P2P_DISABLE"] = "1"
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:512"
-
-# Make sure current directory is in path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-# Check PyTorch before importing to avoid crashes
-try:
-    # Try to import torch
-    import torch
-    print(f"PyTorch {torch.__version__} loaded successfully")
-    if torch.cuda.is_available():
-        print(f"CUDA available: {torch.cuda.get_device_name(0)}")
-    else:
-        print("WARNING: CUDA is not available, application will run on CPU (very slow)")
-except ImportError as e:
-    print(f"Error importing PyTorch: {e}")
-    print("Trying to reinstall PyTorch...")
-    import subprocess
-    subprocess.run(["pip", "uninstall", "-y", "torch", "torchvision", "torchaudio"])
-    subprocess.run(["pip", "install", "torch==1.13.1", "torchvision", "torchaudio", 
-                    "--index-url", "https://download.pytorch.org/whl/cu117"])
-    # Try import again
-    try:
-        import torch
-        print(f"PyTorch reinstalled and loaded: {torch.__version__}")
-    except ImportError as e:
-        print(f"Could not install PyTorch: {e}")
-        sys.exit(1)
-
-# Check if app_original.py exists
-original_app = os.path.join(os.path.dirname(os.path.abspath(__file__)), "app_original.py")
-if os.path.exists(original_app):
-    print("Loading original application...")
-    try:
-        # Replace argv to pass parameters
-        sys.argv = [original_app]
-        if args.port != 7860:
-            sys.argv.extend(["--port", str(args.port)])
-        if args.share:
-            sys.argv.append("--share")
-        
-        # Execute code from app_original.py
-        with open(original_app) as f:
-            code = compile(f.read(), original_app, 'exec')
-            exec(code, globals())
-    except Exception as e:
-        print(f"Error starting original application: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
-else:
-    print("Error: Cannot find app_original.py file")
-    sys.exit(1)
-"""
-    
-    # Save wrapper as app_wrapper.py
-    with open(APP_DIR / "app_wrapper.py", "w") as f:
-        f.write(wrapper_script)
-    
-    logger.info("✅ Compatibility wrapper created")
-
 def create_info_file():
     """Create a JSON file with installation information"""
     info = {
@@ -676,11 +650,8 @@ def main():
     # Install dependencies
     success_count, failure_count = install_dependencies()
     
-    # Copy application files
-    copy_application_files()
-    
-    # Create minimal app.py if it doesn't exist
-    create_fallback_app()
+    # Backup original app.py
+    backup_application_files()
     
     # Create wrapper with CUDA fixes
     create_wrapper()
