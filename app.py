@@ -548,19 +548,28 @@ def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default",
     
     # Free memory from previously loaded model
     if loaded_components["model"] is not None:
-        update_status(f"Unloading previous model: {loaded_components['model_name']}")
+        update_status(
+            f"Unloading previous model: {loaded_components['model_name']}")
         if progress is not None:
-            progress(0.05, desc="Clearing GPU memory...")
-            
+            progress(0.05, desc="Clearing GPU memory…")
+
+        # eliberează modelul principal + VAE
         del loaded_components["model"]
         if loaded_components["vae"] is not None:
             del loaded_components["vae"]
-        for cn_name in loaded_components["controlnet"]:
-            if loaded_components["controlnet"][cn_name] is not None:
-                del loaded_components["controlnet"][cn_name]
+
+        # eliberează fiecare ControlNet fără să modifici dict-ul în timp ce iterăm
+        for cn_name in list(loaded_components["controlnet"].keys()):
+            cn = loaded_components["controlnet"].pop(cn_name, None)
+            if cn is not None:
+                del cn
+
+        # eliberează IP-Adapter
         if loaded_components["ip_adapter"] is not None:
             del loaded_components["ip_adapter"]
-        loaded_components["controlnet"] = {}
+
+        # reset
+        loaded_components["controlnet"].clear()
         torch.cuda.empty_cache()
         gc.collect()
     
