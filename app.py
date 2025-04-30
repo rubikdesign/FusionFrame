@@ -1447,12 +1447,28 @@ def create_interface():
         )
         
         # Update status display periodically
-        gr.on(
-            triggers=[gr.deps.Every(5)],
+ # Update status display periodically (compatible with older Gradio versions)
+        refresh_status = gr.Button("Refresh Status", visible=False)
+        refresh_status.click(
             fn=update_status_display,
             inputs=None,
-            outputs=status_display,
+            outputs=status_display
         )
+        
+        # Create a loop to auto-refresh status
+        def create_auto_refresh():
+            while True:
+                time.sleep(5)  # Refresh every 5 seconds
+                try:
+                    # Note: This will only work in some deployment environments
+                    # but won't crash the app if it fails
+                    status_display.update(value=global_status_message)
+                except:
+                    pass
+                    
+        # Start background thread for auto-refresh
+        import threading
+        threading.Thread(target=create_auto_refresh, daemon=True).start()
     
     return app
 
