@@ -561,7 +561,7 @@ def load_model(
     # ── 1. Curăţăm GPU / RAM de ceea ce era anterior ───────────────────
     if loaded_components["model"] is not None:
         update_status(f"Unloading previous model: {loaded_components['model_name']}")
-        if progress: progress(0.05, desc="Clearing GPU memory…")
+        if progress is not None: progress(0.05, desc="Clearing GPU memory…")
 
         del loaded_components["model"]
         if loaded_components["vae"] is not None:
