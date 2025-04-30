@@ -297,7 +297,7 @@ def download_model_with_progress(model_id, local_dir, progress=None):
     """Download a model with progress tracking for the UI"""
     try:
         update_status(f"Downloading model {model_id}...")
-        if progress:
+        if progress is not None:
             progress(0.1, desc=f"Downloading {model_id}...")
         
         # Use snapshot_download to download the model
@@ -308,7 +308,7 @@ def download_model_with_progress(model_id, local_dir, progress=None):
             local_dir_use_symlinks=False
         )
         
-        if progress:
+        if progress is not None:
             progress(0.9, desc=f"Download of {model_id} complete")
         
         update_status(f"Downloaded model {model_id} to {snapshot_path}")
@@ -323,7 +323,7 @@ def download_file(url, save_path, progress=None):
     """Download a file from a URL and save it locally with progress"""
     try:
         update_status(f"Downloading file from {url}...")
-        if progress:
+        if progress is not None:
             progress(0.1, desc=f"Downloading file from {url}...")
             
         response = requests.get(url, stream=True)
@@ -341,7 +341,7 @@ def download_file(url, save_path, progress=None):
         
         progress_bar.close()
         
-        if progress:
+        if progress is not None:
             progress(0.95, desc="Download complete")
             
         if total_size_in_bytes != 0 and progress_bar.n != total_size_in_bytes:
@@ -364,7 +364,7 @@ def load_vae(vae_name, progress=None):
         return None
     
     update_status(f"Loading VAE: {vae_name}")
-    if progress:
+    if progress is not None:
         progress(0.1, desc=f"Loading VAE: {vae_name}...")
         
     vae_id = VAE_OPTIONS[vae_name]
@@ -379,13 +379,13 @@ def load_vae(vae_name, progress=None):
             cache_dir=cache_dir
         )
         
-        if progress:
+        if progress is not None:
             progress(0.8, desc=f"Moving VAE to GPU...")
             
         if torch.cuda.is_available():
             vae = vae.to("cuda")
             
-        if progress:
+        if progress is not None:
             progress(0.9, desc=f"VAE loaded successfully")
             
         update_status(f"VAE {vae_name} loaded successfully")
@@ -406,7 +406,7 @@ def load_controlnet(controlnet_name, model_type="SD", progress=None):
         return None
     
     update_status(f"Loading ControlNet: {controlnet_name}")
-    if progress:
+    if progress is not None:
         progress(0.1, desc=f"Loading ControlNet: {controlnet_name}...")
     
     cache_path = os.path.join(CONTROLNET_DIR, controlnet_name.replace(" ", "_").lower())
@@ -419,13 +419,13 @@ def load_controlnet(controlnet_name, model_type="SD", progress=None):
             cache_dir=cache_path
         )
         
-        if progress:
+        if progress is not None:
             progress(0.8, desc=f"Moving ControlNet to GPU...")
             
         if torch.cuda.is_available():
             controlnet = controlnet.to("cuda")
             
-        if progress:
+        if progress is not None:
             progress(0.9, desc=f"ControlNet loaded successfully")
             
         update_status(f"ControlNet {controlnet_name} loaded successfully")
@@ -446,7 +446,7 @@ def load_ip_adapter(ip_adapter_name, base_model_path, is_xl=False, progress=None
         return None
     
     update_status(f"Loading IP-Adapter: {ip_adapter_name}")
-    if progress:
+    if progress is not None:
         progress(0.1, desc=f"Loading IP-Adapter: {ip_adapter_name}...")
     
     cache_path = os.path.join(IPADAPTER_DIR, ip_adapter_name.replace(" ", "_").lower())
@@ -472,7 +472,7 @@ def load_ip_adapter(ip_adapter_name, base_model_path, is_xl=False, progress=None
                 cache_dir=cache_path
             )
             
-        if progress:
+        if progress is not None:
             progress(0.9, desc=f"IP-Adapter loaded successfully")
             
         update_status(f"IP-Adapter {ip_adapter_name} loaded successfully")
@@ -502,7 +502,7 @@ def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default",
     # Free memory from previously loaded model
     if loaded_components["model"] is not None:
         update_status(f"Unloading previous model: {loaded_components['model_name']}")
-        if progress:
+        if progress is not None:
             progress(0.05, desc="Clearing GPU memory...")
             
         del loaded_components["model"]
@@ -521,7 +521,7 @@ def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default",
     is_xl = "XL" in model_name
     
     update_status(f"Loading model: {model_name} ({model_id})")
-    if progress:
+    if progress is not None:
         progress(0.1, desc=f"Preparing to load {model_name}...")
     
     # Set explicit model cache directory
@@ -529,13 +529,13 @@ def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default",
     os.makedirs(model_cache_dir, exist_ok=True)
     
     # Load VAE first if specified
-    if progress:
+    if progress is not None:
         progress(0.15, desc=f"Loading VAE...")
     vae = load_vae(vae_name, progress)
     loaded_components["vae"] = vae
     
     # Load controlnet if specified
-    if controlnet_name != "None" and progress:
+    if controlnet_name != "None" and progress is not None:
         progress(0.2, desc=f"Loading ControlNet...")
     controlnet = None
     if controlnet_name != "None":
@@ -545,7 +545,7 @@ def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default",
     
     # Initialize the appropriate pipeline based on model type
     try:
-        if progress:
+        if progress is not None:
             progress(0.3, desc=f"Downloading and loading {model_name}...")
         
         if is_xl:
@@ -589,7 +589,7 @@ def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default",
                     cache_dir=model_cache_dir
                 )
         
-        if progress:
+        if progress is not None:
             progress(0.6, desc=f"Setting up scheduler...")
         
         # Set up scheduler
@@ -597,7 +597,7 @@ def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default",
         if scheduler_fn:
             pipe.scheduler = scheduler_fn(pipe.scheduler.config)
         
-        if progress:
+        if progress is not None:
             progress(0.7, desc=f"Moving model to GPU...")
         
         # Move to GPU if available
@@ -605,7 +605,7 @@ def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default",
             pipe = pipe.to("cuda")
             pipe.enable_attention_slicing()
             
-        if progress:
+        if progress is not None:
             progress(0.8, desc=f"Optimizing memory usage...")
             
         # Optional memory optimization
@@ -626,7 +626,7 @@ def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default",
         loaded_components["model_name"] = model_name
         loaded_components["scheduler_name"] = scheduler_name
         
-        if progress:
+        if progress is not None:
             progress(0.95, desc=f"Model loaded successfully!")
             
         update_status(f"Model {model_name} loaded successfully")
@@ -735,7 +735,7 @@ def generate_controlnet_conditioning(image, controlnet_type, progress=None):
         return None
     
     try:
-        if progress:
+        if progress is not None:
             progress(0.1, desc=f"Preparing {controlnet_type} conditioning...")
             
         # Convert PIL image to numpy array
@@ -743,24 +743,24 @@ def generate_controlnet_conditioning(image, controlnet_type, progress=None):
         
         if "Pose" in controlnet_type:
             update_status("Generating OpenPose conditioning...")
-            if progress:
+            if progress is not None:
                 progress(0.2, desc="Loading OpenPose detector...")
                 
             openpose = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
             
-            if progress:
+            if progress is not None:
                 progress(0.5, desc="Applying OpenPose detection...")
                 
             result = openpose(numpy_image)
             
-            if progress:
+            if progress is not None:
                 progress(0.9, desc="OpenPose conditioning complete")
                 
             return result
         
         elif "Canny Edge" in controlnet_type:
             update_status("Generating Canny Edge conditioning...")
-            if progress:
+            if progress is not None:
                 progress(0.3, desc="Applying Canny edge detection...")
                 
             # Apply Canny edge detection
@@ -770,58 +770,58 @@ def generate_controlnet_conditioning(image, controlnet_type, progress=None):
             edges = cv2.Canny(image_gray, low_threshold, high_threshold)
             edges_colored = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
             
-            if progress:
+            if progress is not None:
                 progress(0.9, desc="Canny edge detection complete")
                 
             return Image.fromarray(edges_colored)
         
         elif "Depth" in controlnet_type:
             update_status("Generating Depth conditioning...")
-            if progress:
+            if progress is not None:
                 progress(0.2, desc="Loading depth estimator...")
                 
             depth_estimator = MidasDetector.from_pretrained("lllyasviel/ControlNet")
             
-            if progress:
+            if progress is not None:
                 progress(0.5, desc="Calculating depth map...")
                 
             result = depth_estimator(numpy_image)
             
-            if progress:
+            if progress is not None:
                 progress(0.9, desc="Depth estimation complete")
                 
             return result
         
         elif "Lineart" in controlnet_type:
             update_status("Generating Lineart conditioning...")
-            if progress:
+            if progress is not None:
                 progress(0.2, desc="Loading lineart detector...")
                 
             lineart = LineartDetector.from_pretrained("lllyasviel/ControlNet")
             
-            if progress:
+            if progress is not None:
                 progress(0.5, desc="Creating lineart...")
                 
             result = lineart(numpy_image)
             
-            if progress:
+            if progress is not None:
                 progress(0.9, desc="Lineart generation complete")
                 
             return result
         
         elif "Soft Edge" in controlnet_type:
             update_status("Generating Soft Edge conditioning...")
-            if progress:
+            if progress is not None:
                 progress(0.2, desc="Loading HED detector...")
                 
             hed = HEDdetector.from_pretrained("lllyasviel/ControlNet")
             
-            if progress:
+            if progress is not None:
                 progress(0.5, desc="Detecting edges...")
                 
             result = hed(numpy_image)
             
-            if progress:
+            if progress is not None:
                 progress(0.9, desc="Soft edge detection complete")
                 
             return result
