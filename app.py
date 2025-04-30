@@ -100,7 +100,6 @@ try:
     from huggingface_hub import HfFolder, snapshot_download
     
     # Configure huggingface cache location
-    #HfFolder.save_cache_file('cli/cache_dir', CACHE_DIR)
     os.environ['HF_HOME'] = CACHE_DIR
     logger.info("Successfully imported AI frameworks")
 except ImportError as e:
@@ -188,6 +187,9 @@ AVAILABLE_MODELS = {
     "RealisticVision XL": "SG161222/RealVisXL_V4.0",
 }
 
+# Default model selection (set to high quality)
+DEFAULT_MODEL = "RealisticVision XL"
+
 SCHEDULER_OPTIONS = {
     "DPM++ 2M Karras": lambda config: DPMSolverMultistepScheduler.from_config(
         config, use_karras_sigmas=True, algorithm_type="dpmsolver++", solver_order=2
@@ -205,6 +207,9 @@ VAE_OPTIONS = {
     "SD 1.5 VAE": "stabilityai/sd-vae-ft-mse"
 }
 
+# Default VAE selection
+DEFAULT_VAE = "SDXL VAE"
+
 # ControlNet models
 CONTROLNET_MODELS = {
     "None": None,
@@ -217,6 +222,9 @@ CONTROLNET_MODELS = {
     "Lineart": "lllyasviel/control_v11p_sd15_lineart",
     "Soft Edge": "lllyasviel/control_v11p_sd15_softedge"
 }
+
+# Default ControlNet selection
+DEFAULT_CONTROLNET = "Depth (SDXL)"
 
 # IP-Adapter models
 IP_ADAPTER_MODELS = {
@@ -242,6 +250,9 @@ IP_ADAPTER_MODELS = {
         "weight_name": "ip-adapter-plus-face_sdxl_vit-h.bin"
     }
 }
+
+# Default IP-Adapter selection
+DEFAULT_IP_ADAPTER = "IP-Adapter Plus (SDXL)"
 
 DEFAULT_LORAS = ["None"]
 lora_files = {}  # To store uploaded LoRA files
@@ -813,7 +824,7 @@ def generate_controlnet_conditioning(image, controlnet_type, progress=None):
 
 def generate_images(
     model_name,
-    woman_image,
+    person_image,
     clothing_image,
     background_image,
     positive_prompt,
@@ -875,7 +886,7 @@ def generate_images(
         generator = torch.Generator("cuda").manual_seed(seed)
         
         # Prepare inputs
-        has_woman = woman_image is not None
+        has_person = person_image is not None
         has_clothing = clothing_image is not None
         has_background = background_image is not None
         
@@ -883,7 +894,7 @@ def generate_images(
         progress(0.4, desc="Processing input images...")
         update_status("Processing input images...")
         
-        woman_img = prepare_image(woman_image) if has_woman else None
+        person_img = prepare_image(person_image) if has_person else None
         clothing_img = prepare_image(clothing_image) if has_clothing else None
         background_img = prepare_image(background_image) if has_background else None
         
@@ -891,14 +902,14 @@ def generate_images(
         base_prompt = positive_prompt.strip() if positive_prompt else ""
         
         # Add more context based on available images
-        if has_woman and has_clothing and has_background:
-            enhanced_prompt = f"{base_prompt}, woman wearing the clothing, in the background scene"
-        elif has_woman and has_clothing:
-            enhanced_prompt = f"{base_prompt}, woman wearing the clothing"
-        elif has_woman and has_background:
-            enhanced_prompt = f"{base_prompt}, woman in the background scene"
-        elif has_woman:
-            enhanced_prompt = f"{base_prompt}, woman"
+        if has_person and has_clothing and has_background:
+            enhanced_prompt = f"{base_prompt}, person wearing the clothing, in the background scene"
+        elif has_person and has_clothing:
+            enhanced_prompt = f"{base_prompt}, person wearing the clothing"
+        elif has_person and has_background:
+            enhanced_prompt = f"{base_prompt}, person in the background scene"
+        elif has_person:
+            enhanced_prompt = f"{base_prompt}, person"
         else:
             enhanced_prompt = base_prompt
         
@@ -926,9 +937,9 @@ def generate_images(
         # Prepare ControlNet input if needed
         progress(0.5, desc="Preparing ControlNet conditioning...")
         controlnet_image = None
-        if controlnet_type != "None" and woman_img is not None:
+        if controlnet_type != "None" and person_img is not None:
             update_status(f"Generating {controlnet_type} conditioning...")
-            controlnet_image = generate_controlnet_conditioning(woman_img, controlnet_type, progress)
+            controlnet_image = generate_controlnet_conditioning(person_img, controlnet_type, progress)
             if controlnet_image:
                 update_status(f"ControlNet conditioning generated successfully")
             else:
@@ -943,9 +954,9 @@ def generate_images(
             
             # Determine which image to use for IP-Adapter
             reference_image = None
-            if has_woman:
-                reference_image = woman_img
-                update_status("Using woman image for IP-Adapter")
+            if has_person:
+                reference_image = person_img
+                update_status("Using person image for IP-Adapter")
             elif has_clothing:
                 reference_image = clothing_img
                 update_status("Using clothing image for IP-Adapter")
@@ -963,7 +974,7 @@ def generate_images(
         outputs = []
         
         # We'll use img2img if any of the input images are provided
-        use_img2img = has_woman or has_clothing or has_background
+        use_img2img = has_person or has_clothing or has_background
         
         # Determine if we're using an XL model
         is_xl = "XL" in model_name
@@ -1044,7 +1055,7 @@ def generate_images(
         
         success_message = f"Successfully generated {len(saved_paths)} images with seed {seed}"
         update_status(success_message)
-        return saved_paths, seed, success_message
+        return outputs, seed, success_message
         
     except Exception as e:
         error_msg = f"Error generating images: {e}"
@@ -1096,9 +1107,9 @@ def display_status():
 def create_interface():
     """Create the Gradio interface with improved status display"""
     
-    with gr.Blocks(title="Clothing Try-On Image Generator", theme=gr.themes.Soft()) as app:
-        gr.Markdown("# 👗 Platformă Avansată de Generare Imagini: Îmbrăcare + Integrare în Fundal")
-        gr.Markdown("Încărcați imagini pentru a genera combinații între model, îmbrăcăminte și fundal, cu setări personalizate.")
+    with gr.Blocks(title="FusionFrame Image Generator", theme=gr.themes.Soft()) as app:
+        gr.Markdown("# 👗 FusionFrame Advanced Image Generator: Virtual Try-On + Background Integration")
+        gr.Markdown("Upload images to generate combinations between people, clothing, and backgrounds with custom settings.")
         
         # Add status display at the top
         status_display = gr.Textbox(
@@ -1110,31 +1121,31 @@ def create_interface():
         # Setup periodic status refresh
         status_display.change(display_status, inputs=None, outputs=[status_display])
         
-        with gr.Tab("Generare Imagini"):
+        with gr.Tab("Image Generation"):
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown("### 📸 1. Încărcare Imagini")
+                    gr.Markdown("### 📸 1. Upload Images")
                     
-                    woman_image    = gr.Image(type="pil", label="Imagine Model")
-                    clothing_image = gr.Image(type="pil", label="Imagine Îmbrăcăminte (Opțional)")
-                    background_image = gr.Image(type="pil", label="Imagine Fundal (Opțional)")
+                    person_image = gr.Image(type="pil", label="Person Image")
+                    clothing_image = gr.Image(type="pil", label="Clothing Image (Optional)")
+                    background_image = gr.Image(type="pil", label="Background Image (Optional)")
                     
                     gr.Markdown("### 🧩 2. LoRA Management")
-                    lora_upload = gr.File(label="Încarcă Fișier LoRA (.safetensors)", file_types=[".safetensors"])
+                    lora_upload = gr.File(label="Upload LoRA File (.safetensors)", file_types=[".safetensors"])
                     
                 with gr.Column(scale=1):
                     gr.Markdown("### 📝 3. Prompt Settings")
                     
                     positive_prompt = gr.Textbox(
-                        label="Prompt Pozitiv",
-                        placeholder="Descrieți ce doriți în imaginea generată",
+                        label="Positive Prompt",
+                        placeholder="Describe what you want in the generated image",
                         lines=3,
                         value="high quality, photorealistic, masterpiece, best quality, intricate details, professional photo, realistic, detailed clothing"
                     )
                     
                     negative_prompt = gr.Textbox(
-                        label="Prompt Negativ", 
-                        placeholder="Descrieți ce doriți să evitați în imaginea generată",
+                        label="Negative Prompt", 
+                        placeholder="Describe what you want to avoid in the generated image",
                         value="deformed, bad anatomy, disfigured, poorly drawn face, mutation, mutated, extra limb, ugly, poorly drawn hands, missing limb, floating limbs, disconnected limbs, malformed hands, blurry, ((((mutated hands and fingers)))), watermark, watermarked, oversaturated, censored, distorted hands, amputation, missing hands, obese, doubled face, double hands, (((nude)))",
                         lines=2
                     )
@@ -1144,13 +1155,13 @@ def create_interface():
                             model_selector = gr.Dropdown(
                                 label="Model",
                                 choices=list(AVAILABLE_MODELS.keys()),
-                                value="SD 1.5"  # Starting with SD 1.5 as it's smaller for testing
+                                value=DEFAULT_MODEL
                             )
                             
                             vae_selector = gr.Dropdown(
                                 label="VAE",
                                 choices=list(VAE_OPTIONS.keys()),
-                                value="Default"
+                                value=DEFAULT_VAE
                             )
                         
                         with gr.Column(scale=1):
@@ -1161,34 +1172,34 @@ def create_interface():
                             )
                             
                             seed = gr.Number(
-                                label="Seed (-1 pentru aleatoriu)",
+                                label="Seed (-1 for random)",
                                 value=-1,
                                 precision=0
                             )
                 
                 with gr.Column(scale=1):
-                    gr.Markdown("### 🧠 4. Setări Avansate")
+                    gr.Markdown("### 🧠 4. Advanced Settings")
                     
-                    with gr.Accordion("ControlNet", open=False):
+                    with gr.Accordion("ControlNet", open=True):
                         controlnet_selector = gr.Dropdown(
-                            label="Tip ControlNet",
+                            label="ControlNet Type",
                             choices=list(CONTROLNET_MODELS.keys()),
-                            value="None"
+                            value=DEFAULT_CONTROLNET
                         )
                         
                         controlnet_scale = gr.Slider(
                             label="ControlNet Conditioning Scale",
                             minimum=0.0,
                             maximum=1.0,
-                            value=0.5,
+                            value=0.6,
                             step=0.05
                         )
                     
-                    with gr.Accordion("IP-Adapter", open=False):
+                    with gr.Accordion("IP-Adapter", open=True):
                         ip_adapter_selector = gr.Dropdown(
                             label="IP-Adapter Model",
                             choices=list(IP_ADAPTER_MODELS.keys()),
-                            value="None"
+                            value=DEFAULT_IP_ADAPTER
                         )
                         
                         ip_adapter_scale = gr.Slider(
@@ -1217,7 +1228,7 @@ def create_interface():
             
             with gr.Row():
                 with gr.Column(scale=1):
-                    gr.Markdown("### ⚙️ 5. Setări Generare")
+                    gr.Markdown("### ⚙️ 5. Generation Settings")
                     
                     with gr.Row():
                         with gr.Column(scale=1):
@@ -1247,7 +1258,7 @@ def create_interface():
                             )
                             
                             num_outputs = gr.Slider(
-                                label="Număr Imagini",
+                                label="Number of Images",
                                 minimum=1,
                                 maximum=4,
                                 value=1,
@@ -1256,39 +1267,39 @@ def create_interface():
                     
                     with gr.Row():
                         image_width = gr.Slider(
-                            label="Lățime Imagine",
+                            label="Image Width",
                             minimum=512,
                             maximum=1024,
-                            value=512,  # Lower default for faster testing
+                            value=768,
                             step=64
                         )
                         
                         image_height = gr.Slider(
-                            label="Înălțime Imagine",
+                            label="Image Height",
                             minimum=512,
                             maximum=1024,
-                            value=512,  # Lower default for faster testing
+                            value=768,
                             step=64
                         )
                     
                     with gr.Row():
-                        generate_button = gr.Button("🚀 Generează Imagini", variant="primary")
-                        clear_button = gr.Button("🧹 Resetează", variant="secondary")
+                        generate_button = gr.Button("🚀 Generate Images", variant="primary")
+                        clear_button = gr.Button("🧹 Reset", variant="secondary")
                 
                 with gr.Column(scale=2):
                     with gr.Row():
                         output_gallery = gr.Gallery(
-                            label="Imagini Generate",
+                            label="Generated Images",
                             show_label=True,
                             elem_id="gallery",
                             height=500
                         )
                         
                     with gr.Row():
-                        output_seed = gr.Number(label="Seed Utilizat", interactive=False)
-                        output_message = gr.Textbox(label="Mesaj Status", interactive=False)
+                        output_seed = gr.Number(label="Seed Used", interactive=False)
+                        output_message = gr.Textbox(label="Status Message", interactive=False)
         
-        with gr.Tab("Informații"):
+        with gr.Tab("Information"):
             gr.Markdown(create_model_info())
             
             # Add a section showing downloaded models
@@ -1339,11 +1350,6 @@ def create_interface():
             
             refresh_models_btn.click(list_downloaded_models, inputs=None, outputs=[downloaded_models])
         
-        # Set up event handlers
-        # woman_image.change(save_uploaded_file, inputs=[woman_image], outputs=[woman_image])
-        # clothing_image.change(save_uploaded_file, inputs=[clothing_image], outputs=[clothing_image])
-        # background_image.change(save_uploaded_file, inputs=[background_image], outputs=[background_image])
-        
         # LoRA uploads should update all LoRA dropdowns
         lora_upload.change(
             save_uploaded_lora,
@@ -1374,8 +1380,8 @@ def create_interface():
                 "high quality, photorealistic, masterpiece, best quality, intricate details, professional photo, realistic, detailed clothing",  # Positive prompt
                 "deformed, bad anatomy, disfigured, poorly drawn face, mutation, mutated, extra limb, ugly, poorly drawn hands, missing limb, floating limbs, disconnected limbs, malformed hands, blurry, ((((mutated hands and fingers)))), watermark, watermarked, oversaturated, censored, distorted hands, amputation, missing hands, obese, doubled face, double hands, (((nude)))",  # Negative prompt
                 "None", 0.7, "None", 0.7, "None", 0.7, "None", 0.7, "None", 0.7,  # LoRAs
-                "None", 0.5, "None", 0.6,  # ControlNet & IP-Adapter
-                0.75, 30, 7.5, 512, 512, 1, -1,  # Generation params
+                DEFAULT_CONTROLNET, 0.6, DEFAULT_IP_ADAPTER, 0.6,  # ControlNet & IP-Adapter
+                0.75, 30, 7.5, 768, 768, 1, -1,  # Generation params
                 [], -1, ""  # Outputs
             ]
         
@@ -1383,7 +1389,7 @@ def create_interface():
             clear_inputs,
             inputs=None,
             outputs=[
-                woman_image, clothing_image, background_image,
+                person_image, clothing_image, background_image,
                 positive_prompt, negative_prompt,
                 lora1, lora1_weight, lora2, lora2_weight, lora3, lora3_weight, 
                 lora4, lora4_weight, lora5, lora5_weight,
@@ -1399,23 +1405,11 @@ def create_interface():
             return global_status_message
         
         # Generation process with status update
-        def generate_with_status_updates(*args):
-            # First update status
-            status_display.update(value="Starting generation process...")
-            
-            # Then call the generate_images function
-            results = generate_images(*args)
-            
-            # Update status again
-            status_display.update(value=global_status_message)
-            
-            return results
-        
         generate_button.click(
-            generate_with_status_updates,
+            generate_images,
             inputs=[
                 model_selector,
-                woman_image,
+                person_image,
                 clothing_image,
                 background_image,
                 positive_prompt,
@@ -1452,27 +1446,82 @@ def create_interface():
     
     return app
 
-# Function to download and preload models for testing
-def download_test_model():
-    """Download a small test model for initial setup verification"""
-    # Verifică dacă modelul există deja
-    test_model_path = os.path.join(MODELS_DIR, "test_model")
-    if os.path.exists(test_model_path) and os.listdir(test_model_path):
-        logger.info("Model deja downloadat. Sărim peste download.")
-        return {
-            "model_path": test_model_path,
-            "test_image_path": os.path.join(OUTPUT_DIR, "test_model_generation.png"),
-            "success": True
-        }
-    
+# Function to download and preload default models for first-time setup
+def download_default_models():
+    """Download default models for initial setup"""
     try:
-        # Select a small, lightweight model for testing
+        # Default model to download
+        default_model_id = AVAILABLE_MODELS[DEFAULT_MODEL]
+        
+        # Default VAE to download if not "Default"
+        default_vae_id = None
+        if DEFAULT_VAE != "Default":
+            default_vae_id = VAE_OPTIONS[DEFAULT_VAE]
+        
+        # Default ControlNet to download
+        default_controlnet_id = None
+        if DEFAULT_CONTROLNET != "None":
+            default_controlnet_id = CONTROLNET_MODELS[DEFAULT_CONTROLNET]
+        
+        # Create model download directory
+        os.makedirs(MODELS_DIR, exist_ok=True)
+        
+        update_status(f"Starting download of default models...")
+        
+        # Download default model
+        update_status(f"Downloading default model: {DEFAULT_MODEL}")
+        model_path = snapshot_download(
+            repo_id=default_model_id,
+            local_dir=os.path.join(MODELS_DIR, DEFAULT_MODEL.replace(" ", "_").lower()),
+            local_dir_use_symlinks=False,
+            resume_download=True,
+            cache_dir=CACHE_DIR
+        )
+        update_status(f"Downloaded default model to {model_path}")
+        
+        # Download default VAE if specified
+        if default_vae_id:
+            update_status(f"Downloading default VAE: {DEFAULT_VAE}")
+            vae_path = snapshot_download(
+                repo_id=default_vae_id,
+                local_dir=os.path.join(MODELS_DIR, "vae", DEFAULT_VAE.replace(" ", "_").lower()),
+                local_dir_use_symlinks=False,
+                resume_download=True,
+                cache_dir=CACHE_DIR
+            )
+            update_status(f"Downloaded default VAE to {vae_path}")
+        
+        # Download default ControlNet if specified
+        if default_controlnet_id:
+            update_status(f"Downloading default ControlNet: {DEFAULT_CONTROLNET}")
+            controlnet_path = snapshot_download(
+                repo_id=default_controlnet_id,
+                local_dir=os.path.join(CONTROLNET_DIR, DEFAULT_CONTROLNET.replace(" ", "_").lower()),
+                local_dir_use_symlinks=False,
+                resume_download=True,
+                cache_dir=CACHE_DIR
+            )
+            update_status(f"Downloaded default ControlNet to {controlnet_path}")
+        
+        update_status(f"All default models downloaded successfully")
+        return True
+    except Exception as e:
+        error_msg = f"Error downloading default models: {e}"
+        update_status(error_msg)
+        logger.error(error_msg)
+        import traceback
+        traceback.print_exc()
+        return False
+
+def install_test_model():
+    """Download a small test model for verifying the installation"""
+    try:
+        # Select a small model for testing
         test_model_id = "runwayml/stable-diffusion-v1-5"
         
         # Create model download directory
         os.makedirs(MODELS_DIR, exist_ok=True)
         
-        # Use snapshot_download for comprehensive model download
         update_status(f"Downloading test model: {test_model_id}")
         
         model_path = snapshot_download(
@@ -1487,7 +1536,9 @@ def download_test_model():
         update_status("Verifying model loading...")
         pipe = StableDiffusionPipeline.from_pretrained(
             model_path, 
-            torch_dtype=torch.float16
+            torch_dtype=torch.float16,
+            safety_checker=None,
+            requires_safety_checker=False
         )
         
         # Move to GPU if available
@@ -1496,7 +1547,7 @@ def download_test_model():
         
         # Simple test generation to validate model
         generator = torch.Generator("cuda").manual_seed(42)
-        test_prompt = "a small cat sitting on a couch"
+        test_prompt = "a beautiful landscape with mountains and trees"
         
         result = pipe(
             prompt=test_prompt, 
@@ -1512,54 +1563,57 @@ def download_test_model():
         
         update_status(f"Test model downloaded and verified successfully. Test image saved to {test_image_path}")
         
-        return {
-            "model_path": model_path,
-            "test_image_path": test_image_path,
-            "success": True
-        }
-    
+        return True
     except Exception as e:
-        error_msg = f"Error downloading test model: {e}"
+        error_msg = f"Error in test model installation: {e}"
         update_status(error_msg)
         logger.error(error_msg)
-        
-        return {
-            "model_path": None,
-            "test_image_path": None,
-            "success": False,
-            "error": str(e)
-        }
+        import traceback
+        traceback.print_exc()
+        return False
 
-def main_test_model_download():
-    """Main function to test model download"""
-    result = download_test_model()
-    
-    if result["success"]:
-        print("Test model download successful!")
-        print(f"Model path: {result['model_path']}")
-        print(f"Test image path: {result['test_image_path']}")
-    else:
-        print("Test model download failed.")
-        print(f"Error: {result.get('error', 'Unknown error')}")
-
+# Main app launch
 if __name__ == "__main__":
-    # Parsare argumente pentru port și share
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="FusionFrame App")
-    parser.add_argument("--port", type=int, default=7860, help="Port pentru interfața web")
-    parser.add_argument("--share", action="store_true", help="Permite share public")
-    args = parser.parse_args()
-
-    # Creează și lansează interfața
     try:
+        parser = argparse.ArgumentParser(description="FusionFrame - Advanced Image Generation Platform")
+        parser.add_argument("--port", type=int, default=7860, help="Port for the web interface")
+        parser.add_argument("--share", action="store_true", help="Share the app publicly")
+        parser.add_argument("--download-default", action="store_true", help="Download default models at startup")
+        parser.add_argument("--test-installation", action="store_true", help="Test installation with a small model")
+        
+        args = parser.parse_args()
+        
+        # Display startup information
+        logger.info("=" * 40)
+        logger.info("FusionFrame - Starting Application")
+        logger.info("=" * 40)
+        logger.info(f"Base directory: {BASE_DIR}")
+        logger.info(f"Port: {args.port}")
+        logger.info(f"Share: {args.share}")
+        logger.info("-" * 40)
+        
+        # Test installation if requested
+        if args.test_installation:
+            logger.info("Testing installation with a small model...")
+            install_test_model()
+        
+        # Download default models if requested
+        if args.download_default:
+            logger.info("Downloading default models...")
+            download_default_models()
+        
+        # Create and launch the interface
         app = create_interface()
+        app.queue()
         app.launch(
-            server_name='0.0.0.0', 
-            port=args.port, 
-            share=args.share
+            server_name="0.0.0.0",
+            server_port=args.port,
+            share=args.share,
+            debug=False,
+            enable_queue=True,
+            max_threads=4
         )
     except Exception as e:
-        logger.error(f"Eroare la lansarea aplicației: {e}")
+        logger.error(f"Error launching application: {e}")
         import traceback
         traceback.print_exc()
