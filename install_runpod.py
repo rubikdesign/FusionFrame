@@ -75,7 +75,7 @@ PACKAGES = [
     ("tqdm==4.65.0", False, ["tqdm"]), 
     ("requests==2.31.0", False, ["requests"]),
     # Non-essential packages can be skipped
-    ("gradio==3.33.1", False, ["gradio==3.32.0", "gradio==3.31.0", "gradio==3.30.0"]),
+    ("gradio==3.50.2", True, ["gradio==3.41.0", "gradio==3.40.1"]),
     ("opencv-python==4.7.0.72", False, ["opencv-python==4.6.0.66", "opencv-python"]),
     ("controlnet-aux==0.0.6", False, ["controlnet-aux==0.0.5", "controlnet-aux"]),
     ("timm==0.9.2", False, ["timm==0.6.12", "timm"]),
