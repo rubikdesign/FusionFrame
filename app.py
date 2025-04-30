@@ -532,169 +532,141 @@ def load_ip_adapter(ip_adapter_name, sd_pipe, is_xl: bool = False, progress=None
         return None
 
 
-def load_model(model_name, scheduler_name="DPM++ 2M Karras", vae_name="Default", 
-               controlnet_name="None", ip_adapter_name="None", force_reload=False,
-               progress=None):
-    """Load the selected model and its components with visible progress"""
+def load_model(
+    model_name,
+    scheduler_name="DPM++ 2M Karras",
+    vae_name="Default",
+    controlnet_name="None",
+    ip_adapter_name="None",
+    force_reload=False,
+    progress=None,
+):
+    """
+    Încarcă un model + (opţional) ControlNet, VAE, IP-Adapter.
+    Evită toate erorile cunoscute:
+      • nu trimite «vae=None» către Diffusers (bug SDXL base)
+      • nu modifică dict-ul controlnet în timp ce îl goleşte
+      • foloseşte un singur dict kwargs pentru pipeline
+    """
     global loaded_components
-    
-    # Check if model is already loaded and no reload is forced
-    if (loaded_components["model"] is not None and 
-        loaded_components["model_name"] == model_name and 
-        loaded_components["scheduler_name"] == scheduler_name and
+
+    # ── 0. Refolosim dacă e deja în RAM ────────────────────────────────
+    if (loaded_components["model"]                             is not None and
+        loaded_components["model_name"]                        == model_name and
+        loaded_components["scheduler_name"]                    == scheduler_name and
         not force_reload):
         update_status(f"Using already loaded model: {model_name}")
         return loaded_components["model"]
-    
-    # Free memory from previously loaded model
-    if loaded_components["model"] is not None:
-        update_status(
-            f"Unloading previous model: {loaded_components['model_name']}")
-        if progress is not None:
-            progress(0.05, desc="Clearing GPU memory…")
 
-        # eliberează modelul principal + VAE
+    # ── 1. Curăţăm GPU / RAM de ceea ce era anterior ───────────────────
+    if loaded_components["model"] is not None:
+        update_status(f"Unloading previous model: {loaded_components['model_name']}")
+        if progress: progress(0.05, desc="Clearing GPU memory…")
+
         del loaded_components["model"]
         if loaded_components["vae"] is not None:
             del loaded_components["vae"]
 
-        # eliberează fiecare ControlNet fără să modifici dict-ul în timp ce iterăm
-        for cn_name in list(loaded_components["controlnet"].keys()):
+        #  folosim list(…) ca să NU iterăm în timp ce modificăm dict-ul
+        for cn_name in list(loaded_components["controlnet"]):
             cn = loaded_components["controlnet"].pop(cn_name, None)
             if cn is not None:
                 del cn
 
-        # eliberează IP-Adapter
         if loaded_components["ip_adapter"] is not None:
             del loaded_components["ip_adapter"]
 
-        # reset
         loaded_components["controlnet"].clear()
         torch.cuda.empty_cache()
         gc.collect()
-    
+
+    # ── 2. Setup de bază ───────────────────────────────────────────────
     model_id = AVAILABLE_MODELS[model_name]
-    is_xl = "XL" in model_name
-    
+    is_xl    = "XL" in model_name
     update_status(f"Loading model: {model_name} ({model_id})")
-    if progress is not None:
-        progress(0.1, desc=f"Preparing to load {model_name}...")
-    
-    # Set explicit model cache directory
+    if progress is not None: progress(0.10, desc=f"Preparing to load {model_name}…")
+
     model_cache_dir = os.path.join(MODELS_DIR, model_name.replace(" ", "_").lower())
     os.makedirs(model_cache_dir, exist_ok=True)
-    
-    # Load VAE first if specified
-    if progress is not None:
-        progress(0.15, desc=f"Loading VAE...")
-    vae = load_vae(vae_name, progress)
+
+    # ── 3. VAE (doar dacă există) ──────────────────────────────────────
+    if progress is not None: progress(0.15, desc="Loading VAE…")
+    vae = load_vae(vae_name, progress) if vae_name != "Default" else None
     loaded_components["vae"] = vae
-    
-    # Load controlnet if specified
-    if controlnet_name != "None" and progress is not None:
-        progress(0.2, desc=f"Loading ControlNet...")
+
+    # ── 4. ControlNet (opţional) ───────────────────────────────────────
+    if progress is not None and controlnet_name != "None":
+        progress(0.20, desc="Loading ControlNet…")
     controlnet = None
     if controlnet_name != "None":
-        controlnet = load_controlnet(controlnet_name, "SDXL" if is_xl else "SD", progress)
+        controlnet = load_controlnet(controlnet_name,
+                                     "SDXL" if is_xl else "SD",
+                                     progress)
         if controlnet:
             loaded_components["controlnet"][controlnet_name] = controlnet
-    
-    # Initialize the appropriate pipeline based on model type
+
+    # ── 5. Construim kwargs comune pentru pipeline ─────────────────────
+    pipe_kwargs = dict(
+        torch_dtype=torch.float16,
+        use_safetensors=True,
+        variant="fp16",
+        cache_dir=model_cache_dir,
+    )
+    if vae is not None:              #  ←  nu trimitem vae=None
+        pipe_kwargs["vae"] = vae
+    if controlnet is not None:
+        pipe_kwargs["controlnet"] = controlnet
+
+    # ── 6. Creăm pipeline-ul ───────────────────────────────────────────
     try:
-        if progress is not None:
-            progress(0.3, desc=f"Downloading and loading {model_name}...")
-        
+        if progress is not None: progress(0.30, desc="Downloading & loading weights…")
+
         if is_xl:
-            if controlnet:
-                pipe = StableDiffusionXLControlNetPipeline.from_pretrained(
-                    model_id,
-                    controlnet=controlnet,
-                    vae=vae,
-                    torch_dtype=torch.float16,
-                    use_safetensors=True,
-                    variant="fp16",
-                    cache_dir=model_cache_dir
-                )
-            else:
-                pipe = StableDiffusionXLPipeline.from_pretrained(
-                    model_id,
-                    vae=vae,
-                    torch_dtype=torch.float16,
-                    use_safetensors=True,
-                    variant="fp16",
-                    cache_dir=model_cache_dir
-                )
+            cls = StableDiffusionXLControlNetPipeline if controlnet else StableDiffusionXLPipeline
         else:
-            if controlnet:
-                pipe = StableDiffusionControlNetPipeline.from_pretrained(
-                    model_id,
-                    controlnet=controlnet,
-                    vae=vae,
-                    torch_dtype=torch.float16,
-                    safety_checker=None,
-                    requires_safety_checker=False,
-                    cache_dir=model_cache_dir
-                )
-            else:
-                pipe = StableDiffusionPipeline.from_pretrained(
-                    model_id,
-                    vae=vae,
-                    torch_dtype=torch.float16,
-                    safety_checker=None,
-                    requires_safety_checker=False,
-                    cache_dir=model_cache_dir
-                )
-        
-        if progress is not None:
-            progress(0.6, desc=f"Setting up scheduler...")
-        
-        # Set up scheduler
-        scheduler_fn = SCHEDULER_OPTIONS.get(scheduler_name)
-        if scheduler_fn:
-            pipe.scheduler = scheduler_fn(pipe.scheduler.config)
-        
-        if progress is not None:
-            progress(0.7, desc=f"Moving model to GPU...")
-        
-        # Move to GPU if available
+            cls = StableDiffusionControlNetPipeline   if controlnet else StableDiffusionPipeline
+
+        # safety_checker doar la SD-urile vechi
+        if not is_xl and "safety_checker" in cls.__init__.__code__.co_varnames:
+            pipe_kwargs.update(safety_checker=None, requires_safety_checker=False)
+
+        pipe = cls.from_pretrained(model_id, **pipe_kwargs)
+
+        # ─ Scheduler ─
+        if progress is not None: progress(0.60, desc="Setting scheduler…")
+        sched_fn = SCHEDULER_OPTIONS.get(scheduler_name)
+        if sched_fn:
+            pipe.scheduler = sched_fn(pipe.scheduler.config)
+
+        # ─ GPU / optimizări ─
+        if progress is not None: progress(0.70, desc="Moving to GPU…")
         if torch.cuda.is_available():
             pipe = pipe.to("cuda")
             pipe.enable_attention_slicing()
-            
-        if progress is not None:
-            progress(0.8, desc=f"Optimizing memory usage...")
-            
-        # Optional memory optimization
-        if torch.cuda.is_available() and hasattr(pipe, "enable_model_cpu_offload"):
-            pipe.enable_model_cpu_offload()
-        
-        # Load IP-Adapter if specified
-        if ip_adapter_name != "None" and progress is not None:
-            progress(0.85, desc=f"Loading IP-Adapter...")
-            
+            if hasattr(pipe, "enable_model_cpu_offload"):
+                pipe.enable_model_cpu_offload()
+
+        # ─ IP-Adapter (opţional) ─
         if ip_adapter_name != "None":
+            if progress: progress(0.85, desc="Loading IP-Adapter…")
             ip_adapter = load_ip_adapter(ip_adapter_name, pipe, is_xl, progress)
-            loaded_components["ip_adapter"] = ip_adapter
-            loaded_components["ip_adapter_name"] = ip_adapter_name
-        
-        # Update loaded components
-        loaded_components["model"] = pipe
-        loaded_components["model_name"] = model_name
+            loaded_components["ip_adapter"]       = ip_adapter
+            loaded_components["ip_adapter_name"]  = ip_adapter_name
+
+        # ─ finalizează ─
+        loaded_components["model"]          = pipe
+        loaded_components["model_name"]     = model_name
         loaded_components["scheduler_name"] = scheduler_name
-        
-        if progress is not None:
-            progress(0.95, desc=f"Model loaded successfully!")
-            
+
+        if progress is not None: progress(0.95, desc="Model ready ✔")
         update_status(f"Model {model_name} loaded successfully")
         return pipe
-    
+
     except Exception as e:
-        error_msg = f"Error loading model: {e}"
-        update_status(error_msg)
-        logger.error(error_msg)
-        import traceback
-        traceback.print_exc()
+        update_status(f"Error loading model: {e}")
+        logger.error(f"Error loading model: {e}", exc_info=True)
         return None
+
 
 def save_uploaded_file(file):
     """Save uploaded file and return the path"""
@@ -894,6 +866,20 @@ def generate_controlnet_conditioning(image, controlnet_type, progress=None):
 # -----------------------------------------------------------------------------
 #  generate_images – versiune stabilă (30 apr 2025)
 # -----------------------------------------------------------------------------
+# ─────────────────────────────────────────────────────────────────────────────
+#  generate_images – safe-fallback edition  (30-apr-2025)
+# ─────────────────────────────────────────────────────────────────────────────
+from diffusers.pipelines.controlnet.pipeline_controlnet_sd_xl import (
+    StableDiffusionXLControlNetPipeline,
+)
+from diffusers.pipelines.controlnet.pipeline_controlnet import (
+    StableDiffusionControlNetPipeline,
+)
+
+def _blank(img_h, img_w):
+    """Returnează un RGB alb de mărimea cerută (PIL)."""
+    return Image.new("RGB", (img_w, img_h), (255, 255, 255))
+
 def generate_images(
     model_name,
     person_image,
@@ -909,8 +895,8 @@ def generate_images(
     controlnet_type,
     controlnet_conditioning_scale,
     ip_adapter_name,
-    ip_adapter_scale,          # ← doar pt. set_ip_adapter_scale()
-    _denoising_strength,       # <- nu mai e folosit (img2img  va fi adăugat separat)
+    ip_adapter_scale,
+    _denoising_strength,          # rezervat pt. img2img
     num_inference_steps,
     guidance_scale,
     image_width,
@@ -921,17 +907,10 @@ def generate_images(
     seed,
     progress = gr.Progress(),
 ):
-    """
-    Creează imagini prin:
-      • Stable-Diffusion / Stable-Diffusion-XL (+ ControlNet)      (fallback)
-      • IP-Adapter (dacă există poză de referinţă)                 (primar)
-
-    Returnează: [PIL], seed folosit, mesaj status.
-    """
-    logger.info(f"Generate: model={model_name} seed={seed}")
+    logger.info(f"Generate: model={model_name}  seed={seed}")
     progress(0.00, desc="Initializing…")
 
-    # ─────────────────────────── 0. Load / cache pipeline ───────────────────
+    # ───────────────────────── 0. Pipeline (re)load ────────────────────────
     pipe = load_model(
         model_name,
         scheduler_name = scheduler_name,
@@ -941,62 +920,65 @@ def generate_images(
         progress       = progress,
     )
     if pipe is None:
-        msg = "❌  Modelul nu s-a putut încărca."
-        update_status(msg)
-        return [], seed, msg
+        err = "❌  Modelul nu s-a putut încărca."
+        update_status(err)
+        return [], seed, err
 
-    # ─────────────────────────── 1. Seed & generator ────────────────────────
+    # ───────────────────────── 1. Seed & RNG ───────────────────────────────
     if seed == -1:
         seed = torch.randint(0, 2**32, (1,)).item()
-    logger.info(f"Seed: {seed}")
-    generator = torch.Generator("cuda").manual_seed(seed)
+    generator = torch.Generator(
+        "cuda" if torch.cuda.is_available() else "cpu"
+    ).manual_seed(seed)
 
-    # ─────────────────────────── 2. Pregătire imagini ───────────────────────
-    progress(0.20, desc="Preparing images…")
-
+    # ───────────────────────── 2. Pregătim imaginile ───────────────────────
     def prep(img): return prepare_image(img) if img else None
     person_img, clothing_img, background_img = map(
         prep, (person_image, clothing_image, background_image))
 
-    has_person, has_cloth, has_back = (
-        person_img is not None,
-        clothing_img is not None,
-        background_img is not None,
-    )
+    has_person = person_img      is not None
+    has_cloth  = clothing_img    is not None
+    has_back   = background_img  is not None
 
-    # ─────────────────────────── 3. Prompt final ────────────────────────────
+    # dacă ControlNet e solicitat dar lipseşte persoana ▶ dezactivăm
+    if controlnet_type != "None" and not has_person:
+        logger.info("No person image ➜ ControlNet dezactivat.")
+        controlnet_type = "None"
+
+    # ───────────────────────── 3. Prompt complet ───────────────────────────
     base = (positive_prompt or "").strip()
     if   has_person and has_cloth and has_back:
-        enhanced_prompt = f"{base}, person wearing the clothing, in the background scene"
+        full_prompt = f"{base}, person wearing the clothing, in the background scene"
     elif has_person and has_cloth:
-        enhanced_prompt = f"{base}, person wearing the clothing"
+        full_prompt = f"{base}, person wearing the clothing"
     elif has_person and has_back:
-        enhanced_prompt = f"{base}, person in the background scene"
+        full_prompt = f"{base}, person in the background scene"
     elif has_person:
-        enhanced_prompt = f"{base}, person"
+        full_prompt = f"{base}, person"
     else:
-        enhanced_prompt = base
-    logger.info("Prompt ready.")
+        full_prompt = base or "photo"
 
-    # ─────────────────────────── 4. ControlNet img ──────────────────────────
+    # ───────────────────────── 4. ControlNet conditioning ──────────────────
     controlnet_img = None
-    if controlnet_type != "None" and has_person:
+    if controlnet_type != "None":
         progress(0.30, desc=f"Generating {controlnet_type} conditioning…")
         controlnet_img = generate_controlnet_conditioning(
             person_img, controlnet_type, progress)
+        if controlnet_img is None:             # fallback dacă detectorul eşuează
+            logger.warning("ControlNet conditioning failed ➜ ignorăm.")
+            controlnet_type = "None"
 
-    # ─────────────────────────── 5. IP-Adapter setup ────────────────────────
-    ip_adapter = loaded_components.get("ip_adapter")
-    reference_image = (
-        person_img or clothing_img or background_img if ip_adapter else None
-    )
-    if ip_adapter and reference_image:
-        # setează scala (dacă API-ul o permite)
+    # ───────────────────────── 5. IP-Adapter (opţional) ────────────────────
+    ip_adapter  = loaded_components.get("ip_adapter")
+    ref_image   = person_img or clothing_img or background_img
+    if ip_adapter and ref_image:
         if hasattr(ip_adapter, "set_ip_adapter_scale"):
             ip_adapter.set_ip_adapter_scale(ip_adapter_scale)
-        logger.info(f"IP-Adapter activated – scale={ip_adapter_scale}")
+        logger.info(f"IP-Adapter on (scale={ip_adapter_scale})")
+    else:
+        ip_adapter = None        # fie nu există, fie n-avem poză
 
-    # ─────────────────────────── 6. LoRA-uri ────────────────────────────────
+    # ───────────────────────── 6. LoRA-uri ─────────────────────────────────
     progress(0.35, desc="Loading LoRAs…")
     for l_name, l_weight in [
         (lora1, lora1_weight),
@@ -1007,37 +989,50 @@ def generate_images(
     ]:
         if l_name and l_name != "None":
             l_path = lora_files.get(l_name)
-            if l_path:
-                pipe = load_lora_weights(pipe, l_path, l_weight)
+            if l_path: pipe = load_lora_weights(pipe, l_path, l_weight)
 
-    # ─────────────────────────── 7. Generare imagini ────────────────────────
-    progress(0.40, desc="Generating images…")
+    # ───────────────────────── 7. Generare ─────────────────────────────────
+    progress(0.40, desc="Generating…")
     outputs = []
-    for idx in range(num_outputs):
-        progress(0.40 + 0.50 * idx / num_outputs,
-                 desc=f"Image {idx+1}/{num_outputs}")
 
-        # —— 7A. cu IP-Adapter (dacă avem referinţă) ————————————————
-        if ip_adapter and reference_image:
+    # determinăm dacă pipeline-ul curent este *ControlNet* şi avem **None**
+    needs_dummy = (
+        controlnet_type == "None" and
+        isinstance(
+            pipe,
+            (
+                StableDiffusionXLControlNetPipeline,
+                StableDiffusionControlNetPipeline,
+            )
+        )
+    )
+    dummy_img = _blank(image_height, image_width) if needs_dummy else None
+
+    for i in range(num_outputs):
+        progress(0.40 + 0.50 * i / max(num_outputs,1),
+                 desc=f"Image {i+1}/{num_outputs}")
+
+        # —— 7A. IP-Adapter ————————————————
+        if ip_adapter:
             try:
                 img = ip_adapter.generate(
-                    pil_image         = reference_image,
-                    prompt            = enhanced_prompt,
-                    negative_prompt   = negative_prompt,
-                    num_samples       = 1,
+                    pil_image           = ref_image,
+                    prompt              = full_prompt,
+                    negative_prompt     = negative_prompt,
+                    num_samples         = 1,
                     num_inference_steps = num_inference_steps,
-                    guidance_scale    = guidance_scale,
-                    width             = image_width,
-                    height            = image_height,
+                    guidance_scale      = guidance_scale,
+                    width               = image_width,
+                    height              = image_height,
                 )[0]
                 outputs.append(img)
-                continue            # succes ⇒ next
+                continue
             except Exception as e:
-                logger.error(f"IP-Adapter failed: {e}; falling back.")
+                logger.error(f"IP-Adapter failed: {e} ➜ fallback diffusers.")
 
-        # —— 7B. diffusion standard ————————————————————————————————
+        # —— 7B. Diffusion ————————————————
         params = dict(
-            prompt              = enhanced_prompt,
+            prompt              = full_prompt,
             negative_prompt     = negative_prompt,
             num_inference_steps = num_inference_steps,
             guidance_scale      = guidance_scale,
@@ -1045,29 +1040,36 @@ def generate_images(
             width               = image_width,
             height              = image_height,
         )
-        if controlnet_img is not None:
+
+        if controlnet_type != "None" and controlnet_img is not None:
             params.update(
                 image = [controlnet_img],
                 controlnet_conditioning_scale = controlnet_conditioning_scale,
             )
+        elif needs_dummy:
+            # pipeline de ControlNet dar nu vrem control ➜ trimitem dummy
+            params["image"] = [dummy_img]
+            params["controlnet_conditioning_scale"] = 0.0
 
         try:
             result = pipe(**params)
-            outputs.extend(result.images)
+            outputs.append(result.images[0])
         except Exception as e:
-            logger.error(f"Diffusion failed: {e}")
-            return [], seed, f"Generation failed: {e}"
+            err = f"❌  Diffusion failed: {e}"
+            logger.error(err)
+            return [], seed, err
 
-    # ─────────────────────────── 8. Salvare & finish ────────────────────────
+    # ───────────────────────── 8. Salvare & finalize ───────────────────────
     progress(0.95, desc="Saving…")
     ts = time.strftime("%Y%m%d_%H%M%S")
-    for i, img in enumerate(outputs):
-        img.save(os.path.join(OUTPUT_DIR, f"generated_{ts}_{i}_{seed}.png"))
+    for idx, img in enumerate(outputs):
+        img.save(os.path.join(OUTPUT_DIR, f"generated_{ts}_{idx}_{seed}.png"))
 
     msg = f"Generated {len(outputs)} image(s) with seed {seed}"
     logger.info(msg)
     progress(1.00, desc="Done.")
     return outputs, seed, msg
+
 
 
 
