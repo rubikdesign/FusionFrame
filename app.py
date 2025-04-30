@@ -3,7 +3,7 @@ import sys
 import torch
 import gradio as gr
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 import requests
 from io import BytesIO
 from safetensors.torch import load_file
@@ -674,7 +674,7 @@ def update_lora_dropdowns(lora_file):
     
     filename = os.path.join(LORA_DIR, lora_file.name)
     with open(filename, "wb") as f:
-        f.write(lora_file.read())
+        f.write(file.read())
     
     # Add to global LoRA files dict
     lora_files[lora_file.name] = filename
@@ -860,6 +860,16 @@ def generate_images(
     progress=gr.Progress()
 ):
     """Generate images based on the provided inputs with visible progress"""
+    # Debug output to console and log file
+    print(f"GENERATE BUTTON CLICKED! Model: {model_name}, Seed: {seed}")
+    logger.info(f"Generate button clicked - starting generation with model {model_name}")
+    with open(os.path.join(LOGS_DIR, "generate_button.log"), "a") as f:
+        f.write(f"{time.time()}: Generate button clicked\n")
+        f.write(f"Model: {model_name}\n")
+        f.write(f"Person image: {person_image is not None}\n")
+        f.write(f"Seed: {seed}\n")
+        f.write("-" * 50 + "\n")
+    
     try:
         # Track overall progress
         progress(0, desc="Initializing...")
@@ -1074,6 +1084,33 @@ def generate_images(
         import traceback
         traceback.print_exc()
         return [], seed, error_msg
+
+def test_generation():
+    """Generate a test image to verify backend is working"""
+    test_img = Image.new('RGB', (768, 768), color=(73, 109, 137))
+    d = ImageDraw.Draw(test_img)
+    d.text((10,10), "Test Image Generated", fill=(255,255,0))
+    return [test_img], 42, "Test generation successful"
+
+
+def test_connection():
+    """Funcție simplă de test pentru a verifica dacă conexiunea funcționează"""
+    print("TEST CONNECTION BUTTON CLICKED!")
+    # Creează o imagine roșie de test
+    test_img = Image.new('RGB', (768, 768), color=(255, 0, 0))
+    d = ImageDraw.Draw(test_img)
+    d.text((10,10), "TEST CONNECTION SUCCESSFUL", fill=(255,255,255), font=None)
+    
+    # Salvează imaginea în director pentru verificare
+    test_path = os.path.join(OUTPUT_DIR, "test_connection.png")
+    test_img.save(test_path)
+    
+    # Scrie în log
+    with open(os.path.join(LOGS_DIR, "test_button.log"), "a") as f:
+        f.write(f"{time.time()}: Test connection button clicked\n")
+    
+    return [test_img], 999, "Test connection successful!"
+
 
 def create_model_info():
     """Create model information markdown"""
@@ -1294,6 +1331,7 @@ def create_interface():
                     
                     with gr.Row():
                         generate_button = gr.Button("🚀 Generate Images", variant="primary")
+                        test_button = gr.Button("🧪 Test Connection", variant="secondary")  # Buton nou
                         clear_button = gr.Button("🧹 Reset", variant="secondary")
                 
                 with gr.Column(scale=2):
@@ -1410,13 +1448,9 @@ def create_interface():
             ]
         )
         
-        # Update status display function
-        def update_status_display():
-            return global_status_message
-        
-        # Generation process with status update
+        # Generate button with debug logs - fix direct reference
         generate_button.click(
-            generate_images,
+            fn=generate_images,  # Direct function reference
             inputs=[
                 model_selector,
                 person_image,
@@ -1443,11 +1477,22 @@ def create_interface():
                 num_outputs,
                 seed
             ],
-            outputs=[output_gallery, output_seed, output_message]
+            outputs=[output_gallery, output_seed, output_message],
+            api_name="generate_api"
         )
         
-        # Update status display periodically
- # Update status display periodically (compatible with older Gradio versions)
+
+        test_button.click(
+            fn=test_connection,  # Funcția simplă de test
+            inputs=None,  # Nu are nevoie de inputuri
+            outputs=[output_gallery, output_seed, output_message]  # Aceleași outputuri ca generate_button
+        )
+        
+        # Update status display function
+        def update_status_display():
+            return global_status_message
+        
+        # Update status display periodically (compatible with older Gradio versions)
         refresh_status = gr.Button("Refresh Status", visible=False)
         refresh_status.click(
             fn=update_status_display,
@@ -1472,6 +1517,13 @@ def create_interface():
     
     return app
 
+def test_generation():
+    """Generate a test image to verify backend is working"""
+    test_img = Image.new('RGB', (768, 768), color=(73, 109, 137))
+    d = ImageDraw.Draw(test_img)
+    d.text((10,10), "Test Image Generated", fill=(255,255,0))
+    return [test_img], 42, "Test generation successful"
+
 # Function to download and preload default models for first-time setup
 def download_default_models():
     """Download default models for initial setup"""
@@ -1494,7 +1546,7 @@ def download_default_models():
         
         update_status(f"Starting download of default models...")
         
-# Download default model
+        # Download default model
         update_status(f"Downloading default model: {DEFAULT_MODEL}")
         model_path = snapshot_download(
             repo_id=default_model_id,
@@ -1630,14 +1682,14 @@ if __name__ == "__main__":
         
         # Create and launch the interface
         app = create_interface()
-        app.queue()
+        app.queue(concurrency_count=1)  # Ensure only one task runs at a time
         app.launch(
             server_name="0.0.0.0",
             server_port=args.port,
             share=args.share,
-            debug=False,
+            debug=True,
             enable_queue=True,
-            max_threads=4
+            max_threads=1
         )
     except Exception as e:
         logger.error(f"Error launching application: {e}")
