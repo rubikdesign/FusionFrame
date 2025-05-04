@@ -23,12 +23,16 @@ except ImportError:
     face_recognition = None
 
 class FusionFrame:
+
     def __init__(self):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model_id = "stabilityai/stable-diffusion-xl-refiner-1.0"  # A highly realistic model
         self.cache_dir = os.path.join(os.path.expanduser("~"), ".fusionframe")
         self.loras_dir = os.path.join(os.getcwd(), "Loras")  # Default LoRAs directory in root
         self.outputs_dir = os.path.join(os.getcwd(), "outputs")  # Directory for saving generated images
-        
+        self.default_refiner_name = "SDXL Refiner 1.0 (Default)"
+        self.refiner_pipe = None
+        self.refiner_model_id = None
         self.available_models = {
             "stabilityai/stable-diffusion-xl-refiner-1.0": "SDXL Refiner 1.0 (Default)",
             "runwayml/stable-diffusion-v1-5": "Stable Diffusion 1.5",
@@ -60,8 +64,16 @@ class FusionFrame:
         self.active_loras = []
         
         # Automatically activate xformers for memory optimization if available
-        self.use_xformers = True
-        
+        try:
+            import xformers
+            self.use_xformers = True
+            print("xFormers found and enabled for memory optimization")
+
+        except (ImportError, RuntimeError) as e:
+            self.use_xformers = False
+            print(f"xFormers not available, memory optimization disabled: {e}")
+            print("This won't affect functionality, but might use more VRAM")
+                
         # Advanced settings
         self.auto_save = True
         self.save_format = "png"  # Save format (png, jpg)
@@ -69,6 +81,21 @@ class FusionFrame:
         self.face_alignment_weight = 0.8  # Weight for facial alignment (0-1)
         self.blend_method = "adaptive"  # Blending method (simple, adaptive, mask)
         self.preserve_face_strength = 0.8  # How much to preserve of the reference face
+
+        # -- Facial selective transfer --
+        self.enable_selective_face = True   # toggled from UI (future feature)
+        self.face_transfer_parts = ("eyes", "nose", "mouth")
+        self.face_transfer_blend = 0.85
+        
+        # -- ControlNet Pose --
+        self.enable_cn_pose = False
+        self.cn_strength_default = 1.0
+        self.openpose_cn = None     # lazy-load
+        self.cn_pipe = None
+        
+        # -- Refiner --
+        self.enable_two_stage = False
+        self.refiner_strength = 0.3  # Default refiner strength
 
     def scan_loras(self):
         """Scan the LoRAs directory for available .safetensors files"""
@@ -80,6 +107,144 @@ class FusionFrame:
             loras[lora_name] = lora_file
             
         return loras
+
+    # ========= ControlNet helpers =========
+    def load_controlnet_pose(self):
+        """Load ControlNet OpenPose SDXL only on first use."""
+        if self.cn_pipe is not None:
+            return True
+
+        try:
+            from diffusers import ControlNetModel, StableDiffusionXLControlNetPipeline
+            print("📦 Loading ControlNet-OpenPose...")
+            
+            # Try alternative model sources if the primary one fails
+            model_sources = [
+
+                "thibaud/controlnet-openpose-sdxl-1.0",  # This is the correct one based on HF
+                "thibaud/controlnet-openpose-sdxl",
+                "diffusers/controlnet-openpose-sdxl",
+                "diffusers/controlnet-openpose-sdxl-1.0" 
+            ]
+            
+            success = False
+            for source in model_sources:
+                try:
+                    print(f"Trying to load ControlNet from: {source}")
+                    self.openpose_cn = ControlNetModel.from_pretrained(
+                        source,
+                        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                        cache_dir=self.cache_dir,
+                        use_auth_token=False,  # Don't require login
+                        local_files_only=False,
+                        resume_download=True
+                    ).to(self.device)
+                    success = True
+                    print(f"Successfully loaded ControlNet from: {source}")
+                    break
+                except Exception as e:
+                    print(f"Failed to load from {source}: {e}")
+            
+            if not success:
+                print("Failed to load ControlNet from any source.")
+                return False
+                
+            # Make sure self.pipe (SDXL) has been already loaded
+            if self.pipe is None:
+                self.load_model()
+                
+            self.cn_pipe = StableDiffusionXLControlNetPipeline(
+                vae=self.pipe.vae,
+                text_encoder=self.pipe.text_encoder,
+                tokenizer=self.pipe.tokenizer,
+                unet=self.pipe.unet,
+                controlnet=self.openpose_cn,
+                scheduler=self.pipe.scheduler,
+                text_encoder_2=self.pipe.text_encoder_2 if hasattr(self.pipe, "text_encoder_2") else None,
+                tokenizer_2=self.pipe.tokenizer_2 if hasattr(self.pipe, "tokenizer_2") else None,
+            ).to(self.device)
+            
+            # xformers (optional)
+            if self.use_xformers and torch.cuda.is_available():
+                try:
+                    self.cn_pipe.enable_xformers_memory_efficient_attention()
+                    print("xFormers activated for ControlNet")
+                except Exception as e:
+                    print(f"xFormers could not be activated for ControlNet: {e}")
+            
+            return True
+        except Exception as e:
+            print(f"Error initializing ControlNet: {e}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+            return False
+
+
+
+
+
+    def setup_controlnet_pipeline(self):
+        """Set up a compatible ControlNet pipeline for the current model"""
+        if self.pipe is None:
+            self.load_model()
+            
+        try:
+            from diffusers import ControlNetModel, StableDiffusionXLControlNetImg2ImgPipeline
+            from controlnet_aux import OpenposeDetector
+            
+            # Load the ControlNet model with specific configuration
+            controlnet = ControlNetModel.from_pretrained(
+                "thibaud/controlnet-openpose-sdxl-1.0",
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                use_safetensors=True
+            ).to(self.device)
+            
+            # Create a completely new pipeline from scratch
+            # The key here is to specify target_size explicitly
+            cn_pipe = StableDiffusionXLControlNetImg2ImgPipeline.from_pretrained(
+                self.current_model,
+                controlnet=controlnet,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                cache_dir=self.cache_dir,
+                use_safetensors=True,
+                variant="fp16"
+            ).to(self.device)
+            
+            # Force disable aesthetics score
+            cn_pipe.config.requires_aesthetics_score = False
+            
+            # Set a fixed target size to avoid dimension conflicts
+            cn_pipe.config.target_size = (1024, 1024)
+            
+            # Ensure scheduler compatibility
+            cn_pipe.scheduler = self.pipe.scheduler
+            
+            if self.use_xformers:
+                try:
+                    cn_pipe.enable_xformers_memory_efficient_attention()
+                    print("xFormers enabled for ControlNet")
+                except Exception as e:
+                    print(f"xFormers couldn't be enabled for ControlNet: {e}")
+            
+            # Set up the pose detector
+            detector = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
+            
+            return cn_pipe, detector
+        except Exception as e:
+            print(f"Error setting up ControlNet: {e}")
+            return None, None
+
     
     def load_model(self, model_id=None):
         """Load the selected model on demand with improved error handling"""
@@ -87,10 +252,13 @@ class FusionFrame:
             self.current_model = model_id
         
         print(f"Loading model: {self.current_model}")
+
+
         
         # Clear CUDA cache if available to prevent OOM issues
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
         
         # Ensure the model is fully downloaded before trying to load it
         try:
@@ -166,6 +334,36 @@ class FusionFrame:
                 raise e
         
         return self.pipe
+
+    def load_refiner_model(self, model_id):
+        """Load a refiner model for two-stage generation"""
+        if self.refiner_pipe and self.refiner_model_id == model_id:
+            return self.refiner_pipe
+
+        self.refiner_model_id = model_id
+        print(f"Loading 2-stage refiner: {model_id}")
+
+        from diffusers import StableDiffusionXLImg2ImgPipeline
+        self.refiner_pipe = StableDiffusionXLImg2ImgPipeline.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+            variant="fp16",
+            cache_dir=self.cache_dir,
+        ).to("cuda" if torch.cuda.is_available() else "cpu")
+
+        # Use the same scheduler as the first stage for consistency
+        if isinstance(self.pipe.scheduler, type(self.refiner_pipe.scheduler)):
+            self.refiner_pipe.scheduler = self.pipe.scheduler
+
+        # Apply xformers if available
+        if self.use_xformers and torch.cuda.is_available():
+            try:
+                self.refiner_pipe.enable_xformers_memory_efficient_attention()
+                print("xFormers activated for refiner")
+            except Exception as e:
+                print(f"xFormers could not be activated for refiner: {e}")
+
+        return self.refiner_pipe
         
     def load_lora(self, lora_path, scale=0.7):
         """Load a LoRA into the pipeline"""
@@ -445,6 +643,12 @@ class FusionFrame:
         attire_customization="",
         decor_customization="",
         face_enhancement=None,  # Override for face enhancement
+        enable_two_stage=False,  # Two-stage refiner
+        refiner_model_name="SDXL Refiner 1.0 (Default)",  # Refiner model
+        refiner_strength=0.3,  # Refiner strength
+        enable_cn_pose=False,  # ControlNet pose
+        cn_strength=1.0,  # ControlNet strength
+        enable_selective_face=True,  # Selective face transfer
         active_loras=None,  # List of (lora_name, is_active, weight) tuples
         progress=gr.Progress(track_tqdm=True),
     ):
@@ -457,13 +661,16 @@ class FusionFrame:
         results = []
         seeds = []
         save_paths = []
+
+        self.enable_two_stage = enable_two_stage
+        self.refiner_strength = refiner_strength
         
         # Set the initial seed
         if seed == -1:
             seed = torch.randint(0, 2**32 - 1, (1,)).item()
         
         # Load the model if not already loaded or if it has changed
-        if self.pipe is None or self.current_model != self.model_id:
+        if self.pipe is None:
             self.load_model()
         
         # Update and apply active LoRAs if provided
@@ -515,6 +722,21 @@ class FusionFrame:
             else:
                 # Fallback to simple blending
                 blended_img = self.adaptive_blend_images(ref_img, pose_img, weight=0.3)
+
+            # --- (Optional) selective feature transfer ----
+            if enable_selective_face and face_mask is not None:
+                try:
+                    import face_utils
+                    src_np = np.array(ref_img)
+                    dst_np = np.array(blended_img)
+                    transferred = face_utils.selective_clone(
+                        src_np, dst_np,
+                        parts=self.face_transfer_parts,
+                        alpha=self.face_transfer_blend
+                    )
+                    blended_img = Image.fromarray(transferred)
+                except Exception as e:
+                    print(f"[SelectiveClone] {e}")
             
             # Use the enhanced prompt method
             enhanced_prompt = self.enhance_prompt(
@@ -536,47 +758,26 @@ class FusionFrame:
                 
                 # For SDXL, try to use IP-Adapter to improve feature transfer
                 use_ip_adapter = False
-                
+
                 if "xl" in self.current_model.lower():
                     try:
-                        # First try the newer method for newer diffusers
-                        try:
-                            from diffusers.models import IPAdapterModel
-                            
-                            ip_model = IPAdapterModel.from_pretrained(
-                                "h94/IP-Adapter", 
-                                subfolder="sdxl_models", 
-                                torch_dtype=torch.float16,
-                                cache_dir=self.cache_dir
-                            )
-                            
-                            self.pipe.set_ip_adapter(ip_model)
-                            self.pipe.set_ip_adapter_scale(0.7)  # Higher value for stronger facial transfer
-                            use_ip_adapter = True
-                            print("IP-Adapter activated for improved facial transfer")
-                        except (ImportError, AttributeError):
-                            # Alternative method for older versions
-                            try:
-                                from IPAdapter import IPAdapterXL
-                                
-                                # Import and configure IP-Adapter explicitly
-                                ip_adapter = IPAdapterXL(
-                                    self.pipe, 
-                                    "h94/IP-Adapter",
-                                    subfolder="sdxl_models",
-                                    cache_dir=self.cache_dir
-                                )
-                                
-                                # Replace pipeline with IP-Adapter pipeline
-                                self.pipe = ip_adapter.pipe
-                                # We'll use ip_adapter.encode_image and ip_adapter.forward instead of cross_attention_kwargs
-                                use_ip_adapter = "manual"
-                                print("Manual IP-Adapter activated for improved facial transfer")
-                            except ImportError:
-                                print("IP-Adapter not available. Install with: pip install git+https://github.com/tencent-ailab/IP-Adapter.git")
+                        from IPAdapter import IPAdapterXL
+                        
+                        ip_adapter = IPAdapterXL(
+                            self.pipe,
+                            "h94/IP-Adapter",
+                            subfolder="sdxl_models",  # Make sure this is included
+                            cache_dir=self.cache_dir
+                        )
+                        
+                        self.pipe = ip_adapter.pipe
+                        use_ip_adapter = "manual"
+                        print("✅ Manual IP-Adapter activated for improved facial transfer")
+                    except ImportError:
+                        print("❌ IP-Adapter not available. Run: pip install git+https://github.com/tencent-ailab/IP-Adapter.git")
                     except Exception as e:
-                        print(f"Error activating IP-Adapter: {e}")
-                
+                        print(f"⚠️ Failed to activate IP-Adapter: {e}")
+
                 # Different parameters based on model type
                 kwargs = {
                     "image": blended_img,  # Use blended image as base
@@ -598,9 +799,71 @@ class FusionFrame:
                         # Manual IP-Adapter handling for older implementations
                         ip_image_embeds = ip_adapter.encode_image(ref_img)
                         kwargs["ip_adapter_image_embeds"] = ip_image_embeds
-                    
-                # Generate the final image
-                result = self.pipe(**kwargs).images[0]
+
+                # If user wants ControlNet Pose and we're on an XL model
+                result = None
+                if enable_cn_pose and "xl" in self.current_model.lower():
+                    try:
+                        cn_pipe, detector = self.setup_controlnet_pipeline()
+                        if cn_pipe and detector:
+                            pose_cond = detector(pose_img)
+                            
+                            cn_result = cn_pipe(
+                                prompt=enhanced_prompt,
+                                negative_prompt=negative_prompt,
+                                image=blended_img,
+                                control_image=pose_cond,
+                                controlnet_conditioning_scale=float(cn_strength),
+                                guidance_scale=guidance_scale,
+                                num_inference_steps=num_inference_steps,
+                                generator=generator,
+                            ).images[0]
+                            
+                            result = cn_result
+                            print("Successfully generated image with ControlNet Pose")
+                        else:
+                            print("Failed to set up ControlNet, falling back to normal pipeline")
+                            result = self.pipe(**kwargs).images[0]
+                    except Exception as e:
+                        print(f"ControlNet error: {e}. Falling back to normal pipeline.")
+                        result = self.pipe(**kwargs).images[0]
+                else:
+                    # Normal pipeline
+                    result = self.pipe(**kwargs).images[0]
+                
+                # -------------------- TWO-STAGE REFINEMENT --------------------
+                if enable_two_stage:
+                    try:
+                        refine_id = self.get_model_id_from_name(refiner_model_name)
+                        refiner = self.load_refiner_model(refine_id)
+
+                        # Setup conservative values (low strength => fine detail)
+                        refine_kwargs = dict(
+                            image=result,
+                            prompt=enhanced_prompt,
+                            negative_prompt=negative_prompt,
+                            strength=self.refiner_strength,  # Use the refiner strength parameter
+                            guidance_scale=max(5.0, guidance_scale - 2),
+                            num_inference_steps=int(num_inference_steps * 0.6),
+                            generator=generator,
+                        )
+
+                        # Callback for refiner progress tracking
+                        def refiner_callback(step, timestep, latents):
+                            total_steps = num_images * num_inference_steps
+                            refiner_total = int(num_inference_steps * 0.6)
+                            progress_value = ((i * num_inference_steps) + num_inference_steps + step) / (total_steps + refiner_total)
+                            progress(min(progress_value, 1.0))
+                            return
+
+                        refine_kwargs["callback"] = refiner_callback
+                        refine_kwargs["callback_steps"] = 1
+
+                        result = refiner(**refine_kwargs).images[0]
+                        print(f"Refinement complete with strength {self.refiner_strength}")
+                    except Exception as e:
+                        print(f"Refiner error: {e}. Using first-stage result.")
+                # --------------------------------------------------------------
                 
                 # Add generated image to results
                 results.append(result)
@@ -655,6 +918,11 @@ class FusionFrame:
         """Set the strength of face preservation"""
         self.preserve_face_strength = value
         return f"Face preservation strength set to {value}"
+    
+    def set_refiner_strength(self, value):
+        """Set the strength of the refiner"""
+        self.refiner_strength = value
+        return f"Refiner strength set to {value}"
 
 
 def build_gradio_interface():
@@ -790,7 +1058,23 @@ def build_gradio_interface():
                         value="DPM++ 2M Karras",
                         label="Sampler"
                     )
-                    
+
+                    with gr.Row():
+                        two_stage_chk = gr.Checkbox(label="Enable 2-stage Refiner", value=False)
+                        refiner_dropdown = gr.Dropdown(
+                            choices=fusion_frame.list_available_models(),
+                            value="SDXL Refiner 1.0 (Default)",
+                            label="Refiner Model",
+                            interactive=True,
+                            visible=False
+                        )
+                        refiner_strength = gr.Slider(
+                            minimum=0.1, maximum=0.7, value=0.3, step=0.05,
+                            label="Refiner Strength",
+                            info="Lower values preserve more details",
+                            visible=False
+                        )
+                        
                     with gr.Row():
                         strength = gr.Slider(0.1, 1.0, 0.75, step=0.05, label="Strength (how much to preserve pose)")
                         guidance_scale = gr.Slider(1.0, 15.0, 7.5, step=0.5, label="Guidance Scale")
@@ -798,7 +1082,17 @@ def build_gradio_interface():
                     with gr.Row():
                         steps = gr.Slider(10, 150, 30, step=1, label="Inference Steps")
                         seed = gr.Number(-1, label="Seed (-1 for random)")
-                    
+
+                    # === ControlNet Pose UI ===
+                    with gr.Row():
+                        enable_cn_pose = gr.Checkbox(label="Enable ControlNet Pose", value=False)
+                        cn_strength = gr.Slider(
+                            minimum=0.0, maximum=2.0, value=1.0, step=0.05,
+                            label="ControlNet Strength",
+                            info="How much the pose controls the generation",
+                            interactive=True,
+                            visible=False
+                        )
                     with gr.Row():
                         num_images = gr.Slider(minimum=1, maximum=10, value=1, step=1, label="Number of Images")
                     
@@ -882,25 +1176,23 @@ def build_gradio_interface():
         # Set up events
         generate_button.click(
             fn=lambda *args: fusion_frame.generate_image(
-                *args[:-15],  # Reference image through decor_customization
-                collect_lora_settings(*args[-15:]),  # LoRA settings
+                *args[:15],  # First 15 existing inputs
+                enable_two_stage=args[15],
+                refiner_model_name=args[16],
+                refiner_strength=args[17],
+                enable_cn_pose=args[18],
+                cn_strength=args[19],
+                enable_selective_face=True,  # Always enabled for now
+                active_loras=collect_lora_settings(*args[20:])
             ),
             inputs=[
-                reference_image,
-                pose_image,
-                prompt,
-                negative_prompt,
-                strength,
-                guidance_scale,
-                steps,
-                seed,
-                width,
-                height,
-                keep_original_size,
-                num_images,
-                attire_customization,
-                decor_customization,
+                reference_image, pose_image,
+                prompt, negative_prompt, strength, guidance_scale,
+                steps, seed, width, height, keep_original_size,
+                num_images, attire_customization, decor_customization,
                 face_enhance,
+                two_stage_chk, refiner_dropdown, refiner_strength,
+                enable_cn_pose, cn_strength,
                 # LoRA settings
                 lora1_name, lora1_active, lora1_weight,
                 lora2_name, lora2_active, lora2_weight,
@@ -930,7 +1222,29 @@ def build_gradio_interface():
             inputs=[face_strength],
             outputs=[],
         )
-        
+
+        # Make ControlNet strength visible only when ControlNet is enabled
+        enable_cn_pose.change(
+            fn=lambda flag: gr.update(visible=flag),
+            inputs=enable_cn_pose,
+            outputs=cn_strength,
+            queue=False
+        )
+
+        # Make refiner controls visible only when two-stage is enabled
+        two_stage_chk.change(
+            fn=lambda x: [gr.update(visible=x), gr.update(visible=x)],
+            inputs=[two_stage_chk],
+            outputs=[refiner_dropdown, refiner_strength],
+        )
+
+        # Update refiner strength when slider changes
+        refiner_strength.change(
+            fn=fusion_frame.set_refiner_strength,
+            inputs=[refiner_strength],
+            outputs=[],
+        )
+
         model_dropdown.change(
             fn=get_model_id,
             inputs=[model_dropdown],
