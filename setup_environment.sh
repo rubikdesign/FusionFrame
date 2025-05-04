@@ -1,6 +1,8 @@
 #!/bin/bash
 # Script pentru configurarea mediului FusionFrame cu suport pentru modele de ultimă generație
-
+apt-get update
+apt-get install -y cmake
+apt-get install -y build-essential
 # Actualizăm pip
 pip install --upgrade pip
 
@@ -14,6 +16,8 @@ pip install accelerate==0.25.0
 pip install safetensors==0.4.0
 pip install xformers==0.0.22.post7
 pip install triton==2.1.0
+pip install opencv-python
+pip install face_recognition
 
 # Instalăm Gradio și alte utilități
 pip install gradio==3.50.2
