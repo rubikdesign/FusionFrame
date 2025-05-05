@@ -25,7 +25,7 @@ FusionFrame is a powerful tool for generating composite images that seamlessly b
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/fusionframe.git
+git clone https://github.com/rubikdesign/FusionFrame.git
 cd fusionframe
 ```
 
