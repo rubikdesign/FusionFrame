@@ -106,10 +106,10 @@ class ControlNetPlugin:
                         torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
                     ).to(device)
                     
-                    # Force disable aesthetics score
-                    if hasattr(self.pipe, "config"):
-                        self.pipe.config.requires_aesthetics_score = False
-                        
+                    # IMPORTANT: Fix for time embedding vector issue
+                    # Use register_to_config method to properly disable the aesthetics score
+                    self.pipe.register_to_config(requires_aesthetics_score=False)
+                    
                     # Create pose detector
                     self.detector = OpenposeDetector.from_pretrained("lllyasviel/ControlNet")
                     
@@ -174,7 +174,7 @@ class ControlNetPlugin:
         pose_image: Image.Image, 
         strength: float = 0.75, 
         guidance_scale: float = 7.5, 
-        controlnet_conditioning_scale: float = 1.0,
+        controlnet_conditioning_scale: Union[float, str] = 1.0,
         num_inference_steps: int = 30, 
         generator = None, 
         callback = None
@@ -189,7 +189,7 @@ class ControlNetPlugin:
             pose_image (PIL.Image): Pose reference image or detected pose
             strength (float): Transformation strength (0-1)
             guidance_scale (float): Classifier-free guidance scale
-            controlnet_conditioning_scale (float): How much to follow the pose control
+            controlnet_conditioning_scale (float or str): How much to follow the pose control
             num_inference_steps (int): Number of denoising steps
             generator: Random number generator
             callback: Progress callback function
@@ -202,16 +202,27 @@ class ControlNetPlugin:
             return input_image
             
         try:
+            # Ensure all numerical parameters are correct types
+            strength_float = float(strength)
+            guidance_scale_float = float(guidance_scale)
+            num_steps_int = int(num_inference_steps)
+            
+            # Ensure controlnet_conditioning_scale is a float
+            if isinstance(controlnet_conditioning_scale, str):
+                controlnet_conditioning_scale_float = float(controlnet_conditioning_scale)
+            else:
+                controlnet_conditioning_scale_float = float(controlnet_conditioning_scale)
+                
             # Run generation with controlnet
             result = self.pipe(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
                 image=input_image,
                 control_image=pose_image,
-                strength=strength,
-                guidance_scale=guidance_scale,
-                controlnet_conditioning_scale=controlnet_conditioning_scale,
-                num_inference_steps=num_inference_steps,
+                strength=strength_float,
+                guidance_scale=guidance_scale_float,
+                controlnet_conditioning_scale=controlnet_conditioning_scale_float,
+                num_inference_steps=num_steps_int,
                 generator=generator,
                 callback=callback,
                 callback_steps=1

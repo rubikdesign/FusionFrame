@@ -66,12 +66,17 @@ class IPAdapterPlugin:
             # Dynamically import to avoid errors if not installed
             from ip_adapter import IPAdapterXL
             
-            # Initialize the IP-Adapter
+            # Calea către modelul IP-Adapter
+            ip_ckpt = os.path.join(self.cache_dir, "IP-Adapter", "models", "ip-adapter-plus-face_sdxl.bin")
+            
+            # Dacă fișierul nu există local, folosim calea directă de pe Hugging Face
+            if not os.path.exists(ip_ckpt):
+                ip_ckpt = "h94/IP-Adapter/sdxl_models/ip-adapter-plus-face_sdxl.bin"
+            
+            # Initialize the IP-Adapter cu parametrul obligatoriu ip_ckpt
             self.ip_adapter = IPAdapterXL(
-                pipe,
-                "h94/IP-Adapter",
-                subfolder="sdxl_models",
-                cache_dir=self.cache_dir,
+                pipe, 
+                ip_ckpt,
                 device=device
             )
             
@@ -99,28 +104,17 @@ class IPAdapterPlugin:
             # Dynamically import to avoid errors if not installed
             from ip_adapter import IPAdapterPlusXL
             
-            # Check if the model files exist locally
-            model_dir = os.path.join(self.cache_dir, "IP-Adapter")
-            face_id_path = os.path.join(model_dir, "models/face-id/model.ckpt")
-            ip_adapter_path = os.path.join(model_dir, "sdxl_models/ip-adapter-plus-face_sdxl_vit-h.bin")
+            # Definim calea către modelul IP-Adapter
+            ip_ckpt = os.path.join(self.cache_dir, "IP-Adapter", "models", "ip-adapter-plus-face_sdxl.bin")
             
-            # Check if files exist, otherwise try to download
-            if not os.path.exists(face_id_path) or not os.path.exists(ip_adapter_path):
-                logger.warning("IP-Adapter model files not found locally")
-                logger.info("Using direct model references from Hugging Face")
-                
-                image_encoder_path = None  # Let the library handle it
-                ip_adapter_checkpoint = None  # Let the library handle it
-            else:
-                logger.info("Using local IP-Adapter model files")
-                image_encoder_path = face_id_path
-                ip_adapter_checkpoint = ip_adapter_path
+            # Dacă fișierul nu există local, folosim calea directă de pe Hugging Face
+            if not os.path.exists(ip_ckpt):
+                ip_ckpt = "h94/IP-Adapter/sdxl_models/ip-adapter-plus-face_sdxl.bin"
             
             # Initialize the IP-Adapter
             self.ip_adapter = IPAdapterPlusXL(
                 pipe,
-                image_encoder_path=image_encoder_path,
-                ip_adapter_checkpoint=ip_adapter_checkpoint,
+                ip_ckpt,  # Parametrul obligatoriu
                 device=device,
                 num_tokens=16
             )
@@ -186,47 +180,3 @@ class IPAdapterPlugin:
         except Exception as e:
             logger.error(f"Error during IP-Adapter generation: {e}")
             return input_image
-
-
-def download_models(cache_dir: str) -> bool:
-    """
-    Download IP-Adapter models from Hugging Face.
-    
-    Args:
-        cache_dir (str): Directory to save models
-        
-    Returns:
-        bool: True if download was successful, False otherwise
-    """
-    try:
-        from huggingface_hub import snapshot_download
-        
-        # Create the target directory
-        ip_adapter_dir = os.path.join(cache_dir, "IP-Adapter")
-        os.makedirs(ip_adapter_dir, exist_ok=True)
-        
-        # Download the models
-        logger.info("Downloading IP-Adapter models...")
-        
-        # Download base models
-        snapshot_download(
-            repo_id="h94/IP-Adapter",
-            local_dir=os.path.join(ip_adapter_dir, "models"),
-            resume_download=True,
-            local_files_only=False
-        )
-        
-        # Download SDXL models
-        snapshot_download(
-            repo_id="h94/IP-Adapter",
-            local_dir=os.path.join(ip_adapter_dir, "sdxl_models"),
-            subfolder="sdxl_models",
-            resume_download=True,
-            local_files_only=False
-        )
-        
-        logger.info("IP-Adapter models downloaded successfully")
-        return True
-    except Exception as e:
-        logger.error(f"Error downloading IP-Adapter models: {e}")
-        return False

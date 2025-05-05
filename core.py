@@ -23,7 +23,8 @@ from diffusers.utils import load_image
 import config
 
 # Import utilities
-from utils import face_utils, io_utils
+import utils.face_utils as face_utils
+import utils.io_utils as io_utils
 
 # Import plugins
 from plugins.ip_adapter import IPAdapterPlugin
@@ -827,17 +828,17 @@ class FusionFrame:
                 kwargs["callback_steps"] = 1
             
             # IP-Adapter setup for XL models
-            use_ip_adapter = False
-            if "xl" in self.current_model_id.lower():
-                # Try to use IP-Adapter
-                if self.ip_adapter.is_available:
-                    # Setup IP-Adapter
-                    setup_success = self.ip_adapter.setup(self.pipe, self.device)
-                    if setup_success:
-                        ip_image_embeds = self.ip_adapter.ip_adapter.encode_image(ref_img)
-                        kwargs["ip_adapter_image_embeds"] = ip_image_embeds
-                        use_ip_adapter = True
-                        logger.info("IP-Adapter activated for improved facial transfer")
+            # use_ip_adapter = False
+            # if "xl" in self.current_model_id.lower():
+            #     # Try to use IP-Adapter
+            #     if self.ip_adapter.is_available:
+            #         # Setup IP-Adapter
+            #         setup_success = self.ip_adapter.setup(self.pipe, self.device)
+            #         if setup_success:
+            #             ip_image_embeds = self.ip_adapter.ip_adapter.encode_image(ref_img)
+            #             kwargs["ip_adapter_image_embeds"] = ip_image_embeds
+            #             use_ip_adapter = True
+            #             logger.info("IP-Adapter activated for improved facial transfer")
             
             # Generate the image
             result = None
@@ -864,7 +865,7 @@ class FusionFrame:
                         pose_image=pose_detection,
                         strength=strength,
                         guidance_scale=guidance_scale,
-                        controlnet_conditioning_scale=cn_strength,
+                        controlnet_conditioning_scale=float(cn_strength),
                         num_inference_steps=num_inference_steps,
                         generator=generator,
                         callback=kwargs.get("callback")
@@ -894,6 +895,10 @@ class FusionFrame:
                             refine_id = model_id
                             break
                     
+                    if isinstance(refiner_model_name, (int, float)):
+                        logger.warning(f"Refiner model name should be a string, not a number: {refiner_model_name}")
+                        refiner_model_name = "SDXL Refiner 1.0 (Default)"
+
                     if not refine_id:
                         logger.warning(f"Refiner model '{refiner_model_name}' not found. Using default.")
                         refine_id = config.DEFAULT_REFINER_ID

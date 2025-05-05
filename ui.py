@@ -38,7 +38,7 @@ def build_gradio_interface():
         lora2_name, lora2_active, lora2_weight,
         lora3_name, lora3_active, lora3_weight,
         lora4_name, lora4_active, lora4_weight,
-        lora5_name, lora5_active, lora5_weight
+        lora5_name, lora5_active, lora5_weight=0.75  # Adaugă valoare implicită
     ):
         """Collect LoRA settings from UI elements into a list of tuples."""
         active_loras = []
@@ -55,7 +55,7 @@ def build_gradio_interface():
             active_loras.append((lora5_name, lora5_active, lora5_weight))
             
         return active_loras
-    
+        
     # Function to rescan LoRAs directory
     def rescan_loras():
         """Rescan LoRAs directory and update dropdowns."""

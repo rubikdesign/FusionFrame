@@ -1,0 +1,7 @@
+
+
+pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu118
+pip install diffusers transformers gradio Pillow
+pip install opencv-python-headless
+pip install -U bitsandbytes
+pip install accelerate
