@@ -10,8 +10,8 @@ import sys
 import argparse
 import logging
 
-from fusionframe.config.app_config import AppConfig
-from fusionframe.interface.ui import FusionFrameUI
+from config.app_config import AppConfig
+from interface.ui import FusionFrameUI
 
 def parse_arguments():
     """

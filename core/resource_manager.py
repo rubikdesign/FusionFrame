@@ -12,7 +12,7 @@ import psutil
 import torch
 from typing import Dict, Any, Optional
 
-from fusionframe.config.app_config import AppConfig
+from config.app_config import AppConfig
 
 # Setăm logger-ul
 logger = logging.getLogger(__name__)

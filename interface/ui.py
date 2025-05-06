@@ -14,12 +14,12 @@ import time
 from typing import Dict, Any, List, Optional, Union, Tuple
 from PIL import Image
 
-from fusionframe.config.app_config import AppConfig
-from fusionframe.core.model_manager import ModelManager
-from fusionframe.core.pipeline_manager import PipelineManager
-from fusionframe.processing.analyzer import OperationAnalyzer
-from fusionframe.interface.components import create_examples, create_advanced_settings_panel
-from fusionframe.interface.styles import CSS_STYLES
+from config.app_config import AppConfig
+from core.model_manager import ModelManager
+from core.pipeline_manager import PipelineManager
+from processing.analyzer import OperationAnalyzer
+from interface.components import create_examples, create_advanced_settings_panel
+from interface.styles import CSS_STYLES
 
 # Setăm logger-ul
 logger = logging.getLogger(__name__)

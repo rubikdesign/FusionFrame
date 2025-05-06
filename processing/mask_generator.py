@@ -13,8 +13,8 @@ from typing import Dict, Any, List, Optional, Union, Tuple, Callable
 from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 
-from fusionframe.config.app_config import AppConfig
-from fusionframe.core.model_manager import ModelManager
+from config.app_config import AppConfig
+from core.model_manager import ModelManager
 
 # Setăm logger-ul
 logger = logging.getLogger(__name__)

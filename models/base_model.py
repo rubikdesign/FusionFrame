@@ -10,7 +10,7 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, Union
 
-from fusionframe.config.app_config import AppConfig
+from config.app_config import AppConfig
 
 # Setăm logger-ul
 logger = logging.getLogger(__name__)

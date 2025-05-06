@@ -76,7 +76,7 @@ class AppConfig:
         Path(cls.LOGS_DIR).mkdir(parents=True, exist_ok=True)
         
         # Configurează logging-ul general
-        log_file = os.path.join(cls.LOGS_DIR, "fusionframe.log")
+        log_file = os.path.join(cls.LOGS_DIR, "logs")
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

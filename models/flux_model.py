@@ -12,9 +12,9 @@ from typing import Dict, Any, Optional, List, Union, Tuple
 from PIL import Image
 import numpy as np
 
-from fusionframe.config.app_config import AppConfig
-from fusionframe.config.model_config import ModelConfig
-from fusionframe.models.base_model import BaseModel
+from config.app_config import AppConfig
+from config.model_config import ModelConfig
+from models.base_model import BaseModel
 
 # Setăm logger-ul
 logger = logging.getLogger(__name__)

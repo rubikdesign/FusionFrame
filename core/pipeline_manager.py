@@ -8,7 +8,7 @@ Manager pentru pipeline-uri de procesare în FusionFrame 2.0
 import logging
 from typing import Dict, Any, Type, List, Optional, Callable
 
-from fusionframe.processing.pipelines.base_pipeline import BasePipeline
+from processing.pipelines.base_pipeline import BasePipeline
 
 # Setăm logger-ul
 logger = logging.getLogger(__name__)
@@ -137,7 +137,7 @@ class PipelineManager:
                 - 'operation': Detalii despre operație
                 - 'message': Mesaj despre procesare
         """
-        from fusionframe.processing.analyzer import OperationAnalyzer
+        from processing.analyzer import OperationAnalyzer
         
         # Detectăm automat operația dacă nu este specificată
         if not operation_type:

@@ -11,8 +11,8 @@ import numpy as np
 from typing import Dict, Any, Optional, Union, Tuple, Callable
 from PIL import Image
 
-from fusionframe.config.app_config import AppConfig
-from fusionframe.core.model_manager import ModelManager
+from config.app_config import AppConfig
+from core.model_manager import ModelManager
 
 # Setăm logger-ul
 logger = logging.getLogger(__name__)

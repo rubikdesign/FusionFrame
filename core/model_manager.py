@@ -15,8 +15,8 @@ from tqdm.auto import tqdm
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
 
-from fusionframe.config.app_config import AppConfig
-from fusionframe.config.model_config import ModelConfig
+from config.app_config import AppConfig
+from config.model_config import ModelConfig
 
 # Setăm logger-ul
 logger = logging.getLogger(__name__)
