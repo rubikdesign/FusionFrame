@@ -1,0 +1,1 @@
+# Pachetul de pipeline-uri de procesare pentru FusionFrame 2.0

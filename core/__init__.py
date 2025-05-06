@@ -1,0 +1,1 @@
+# Pachetul core pentru FusionFrame 2.0

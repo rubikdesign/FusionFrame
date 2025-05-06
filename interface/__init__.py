@@ -1,0 +1,1 @@
+# Pachetul de interfață pentru FusionFrame 2.0

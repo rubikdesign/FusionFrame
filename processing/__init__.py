@@ -1,0 +1,1 @@
+# Pachetul de procesare pentru FusionFrame 2.0
