@@ -43,7 +43,7 @@ FusionFrame integrates multiple AI technologies for best-in-class results:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/yourusername/fusionframe.git
+   git clone https://github.com/rubikdesign/FusionFrame.git
    cd fusionframe
    ```
 
