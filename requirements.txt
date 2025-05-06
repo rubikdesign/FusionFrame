@@ -1,0 +1,27 @@
+torch==2.0.1
+torchvision==0.15.2
+numpy==1.24.3
+opencv-python-headless==4.8.0.74
+pillow==10.0.0
+gradio==3.50.2
+scikit-image==0.21.0
+requests==2.31.0
+tqdm==4.65.0
+
+# Diffusers and transformers
+diffusers==0.16.1
+transformers==4.27.4
+accelerate==0.21.0
+safetensors==0.3.1
+huggingface_hub==0.16.4
+
+# Segmentation models
+mediapipe==0.10.3
+segment-anything==1.0
+ultralytics==8.0.20
+
+# Specialized tools
+lama-cleaner==1.2.5
+rembg==2.0.50
+xformers==0.0.20
+bitsandbytes==0.41.1
