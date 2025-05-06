@@ -6,7 +6,7 @@ Manager pentru pipeline-uri de procesare în FusionFrame 2.0
 """
 
 import logging
-from typing import Dict, Any, Type, List, Optional, Callable
+from typing import Dict, Any, Optional, Callable
 
 from processing.pipelines.base_pipeline import BasePipeline
 
@@ -33,13 +33,38 @@ class PipelineManager:
         if self._initialized:
             return
         
-        self.pipelines = {}
-        self.pipeline_types = {}
+        # Înregistrăm toate pipeline-urile disponibile
+        from processing.pipelines.general_pipeline       import GeneralPipeline
+        from processing.pipelines.removal_pipeline       import RemovalPipeline
+        from processing.pipelines.color_change_pipeline  import ColorChangePipeline
+        from processing.pipelines.add_object_pipeline    import AddObjectPipeline
+        from processing.pipelines.background_pipeline    import BackgroundPipeline
+        
+        self.pipeline_types: Dict[str, BasePipeline] = {}
+        # Registrăm clasele de pipeline
+        self.register_pipeline("general_pipeline", GeneralPipeline)
+        self.register_pipeline("removal_pipeline", RemovalPipeline)
+        self.register_pipeline("color_change_pipeline", ColorChangePipeline)
+        self.register_pipeline("add_object_pipeline", AddObjectPipeline)
+        self.register_pipeline("background_pipeline", BackgroundPipeline)
+
+        # Aliasuri pentru operation_type
+        # Operații comune mapate la pipeline-uri
+        self.operation_to_pipeline = {
+            "remove":   {"person": "removal_pipeline", "default": "removal_pipeline"},
+            "color":    {"hair":   "color_change_pipeline", "default": "color_change_pipeline"},
+            "add":      {"default": "add_object_pipeline"},
+            "background": {"default": "background_pipeline"},
+            # orice altă operație: va folosi pipeline general
+        }
+        
+        # cache pentru instanțele de pipeline
+        self.pipelines: Dict[str, BasePipeline] = {}
         
         self._initialized = True
         logger.info("PipelineManager initialized")
     
-    def register_pipeline(self, name: str, pipeline_class: Type[BasePipeline]) -> None:
+    def register_pipeline(self, name: str, pipeline_class: BasePipeline) -> None:
         """
         Înregistrează un tip de pipeline pentru utilizare
         
@@ -57,7 +82,7 @@ class PipelineManager:
         Args:
             name: Numele pipeline-ului
             **kwargs: Argumente pentru inițializarea pipeline-ului
-            
+        
         Returns:
             Instanța pipeline-ului sau None dacă pipeline-ul nu există
         """
@@ -65,7 +90,6 @@ class PipelineManager:
             logger.warning(f"Pipeline '{name}' not registered")
             return None
         
-        # Instanțiază pipeline-ul dacă nu există deja
         if name not in self.pipelines:
             self.pipelines[name] = self.pipeline_types[name](**kwargs)
             logger.info(f"Pipeline '{name}' instantiated")
@@ -79,46 +103,24 @@ class PipelineManager:
         Args:
             operation_type: Tipul operației (remove, color, add, background, etc.)
             target: Ținta operației (opțional)
-            
+        
         Returns:
             Pipeline-ul potrivit pentru operație sau None dacă niciun pipeline nu este potrivit
         """
-        # Mapăm tipurile de operații la pipeline-uri
-        operation_to_pipeline = {
-            "remove": {
-                "person": "removal_pipeline",
-                "default": "removal_pipeline"
-            },
-            "color": {
-                "hair": "color_change_pipeline",
-                "default": "color_change_pipeline"
-            },
-            "add": {
-                "default": "add_object_pipeline"
-            },
-            "background": {
-                "default": "background_pipeline"
-            }
-        }
-        
-        # Obținem numele pipeline-ului pentru operație
-        pipeline_name = None
-        if operation_type in operation_to_pipeline:
-            if target and target in operation_to_pipeline[operation_type]:
-                pipeline_name = operation_to_pipeline[operation_type][target]
-            else:
-                pipeline_name = operation_to_pipeline[operation_type].get("default")
-        
-        # Dacă nu găsim un pipeline specific, folosim pipeline-ul general
-        if not pipeline_name:
+        pipeline_key = None
+        mapping = self.operation_to_pipeline.get(operation_type)
+        if mapping:
+            pipeline_key = mapping.get(target) if target in mapping else mapping.get("default")
+
+        if not pipeline_key:
             logger.info(f"No specific pipeline for operation '{operation_type}', using general pipeline")
-            pipeline_name = "general_pipeline"
-        
-        # Returnăm pipeline-ul
-        return self.get_pipeline(pipeline_name)
+            pipeline_key = "general_pipeline"
+
+        return self.get_pipeline(pipeline_key)
     
-    def process_image(self, image, prompt, strength=0.75, operation_type=None, 
-                     target=None, progress_callback=None) -> Dict[str, Any]:
+    def process_image(self, image, prompt: str, strength: float = 0.75,
+                      operation_type: str = None, target: str = None,
+                      progress_callback: Callable = None, **kwargs) -> Dict[str, Any]:
         """
         Procesează o imagine folosind pipeline-ul potrivit
         
@@ -129,7 +131,7 @@ class PipelineManager:
             operation_type: Tipul operației (opțional, va fi detectat automat)
             target: Ținta operației (opțional)
             progress_callback: Funcție de callback pentru progres
-            
+        
         Returns:
             Dicționar cu rezultatele procesării:
                 - 'result': Imaginea rezultată
@@ -138,18 +140,15 @@ class PipelineManager:
                 - 'message': Mesaj despre procesare
         """
         from processing.analyzer import OperationAnalyzer
-        
-        # Detectăm automat operația dacă nu este specificată
+
         if not operation_type:
-            # Analizăm operația din prompt
             analyzer = OperationAnalyzer()
             operation = analyzer.analyze_operation(prompt)
-            operation_type = operation['type']
+            operation_type = operation.get('type')
             target = operation.get('target')
-        
-        # Obținem pipeline-ul potrivit
+
         pipeline = self.get_pipeline_for_operation(operation_type, target)
-        
+
         if not pipeline:
             logger.error(f"No pipeline available for operation '{operation_type}'")
             return {
@@ -158,15 +157,15 @@ class PipelineManager:
                 'operation': {'type': operation_type, 'target': target},
                 'message': f"No pipeline available for operation '{operation_type}'"
             }
-        
-        # Procesăm imaginea cu pipeline-ul
+
         try:
             logger.info(f"Processing image with '{pipeline.__class__.__name__}'")
             result = pipeline.process(
                 image=image,
-                prompt=prompt, 
+                prompt=prompt,
                 strength=strength,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                **kwargs
             )
             return result
         except Exception as e:

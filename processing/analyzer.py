@@ -22,7 +22,6 @@ class OperationAnalyzer:
     Responsabil pentru interpretarea prompturilor și clasificarea
     operațiilor de editare pentru a selecta pipeline-ul adecvat.
     """
-    
     def __init__(self):
         """Inițializează analizatorul de operații"""
         # Maparea regex-urilor pentru tipuri de operații
@@ -52,102 +51,102 @@ class OperationAnalyzer:
                    
        }
 
-def analyze_operation(self, prompt: str) -> Dict[str, Any]:
-    """
-    Analizează promptul pentru a determina tipul operației
-    
-    Args:
-        prompt: Promptul de analizat
+    def analyze_operation(self, prompt: str) -> Dict[str, Any]:
+        """
+        Analizează promptul pentru a determina tipul operației
         
-    Returns:
-        Dicționar cu informații despre operație
-    """
-    # Normalizăm promptul
-    prompt_lower = prompt.lower().strip()
-    
-    # Iterăm prin fiecare tip de operație și pattern-urile asociate
-    for op_type, patterns in self.operation_patterns.items():
-        for pattern, match_type in patterns:
-            match = re.search(pattern, prompt_lower)
-            if match:
-                groups = match.groupdict()
-                return {
-                    'type': op_type,
-                    'target': groups.get('target', '').strip(),
-                    'attribute': groups.get('attr', '').strip(),
-                    'confidence': 0.95
-                }
-    
-    # Dacă nu am găsit o potrivire exactă, facem o potrivire mai generală
-    general_match = self._general_match(prompt_lower)
-    if general_match:
-        return general_match
-    
-    # Returnăm o operație generală dacă nu putem determina tipul
-    return {
-        'type': 'general',
-        'target': '',
-        'attribute': prompt_lower,
-        'confidence': 0.5
-    }
+        Args:
+            prompt: Promptul de analizat
+            
+        Returns:
+            Dicționar cu informații despre operație
+        """
+        # Normalizăm promptul
+        prompt_lower = prompt.lower().strip()
+        
+        # Iterăm prin fiecare tip de operație și pattern-urile asociate
+        for op_type, patterns in self.operation_patterns.items():
+            for pattern, match_type in patterns:
+                match = re.search(pattern, prompt_lower)
+                if match:
+                    groups = match.groupdict()
+                    return {
+                        'type': op_type,
+                        'target': groups.get('target', '').strip(),
+                        'attribute': groups.get('attr', '').strip(),
+                        'confidence': 0.95
+                    }
+        
+        # Dacă nu am găsit o potrivire exactă, facem o potrivire mai generală
+        general_match = self._general_match(prompt_lower)
+        if general_match:
+            return general_match
+        
+        # Returnăm o operație generală dacă nu putem determina tipul
+        return {
+            'type': 'general',
+            'target': '',
+            'attribute': prompt_lower,
+            'confidence': 0.5
+        }
 
-def _general_match(self, prompt: str) -> Optional[Dict[str, Any]]:
-    """
-    Efectuează o potrivire mai relaxată pentru prompt
-    
-    Args:
-        prompt: Promptul de analizat
+    def _general_match(self, prompt: str) -> Optional[Dict[str, Any]]:
+        """
+        Efectuează o potrivire mai relaxată pentru prompt
         
-    Returns:
-        Dicționar cu informații despre operație sau None
-    """
-    # Cuvinte cheie pentru fiecare tip de operație
-    keywords = {
-        'remove': ['remove', 'delete', 'erase', 'eliminate', 'get rid', 'take out'],
-        'replace': ['replace', 'swap', 'change', 'substitute', 'switch'],
-        'color': ['color', 'recolor', 'hue', 'tint', 'shade'],
-        'background': ['background', 'backdrop', 'scene', 'setting', 'environment'],
-        'add': ['add', 'place', 'put', 'insert', 'include', 'attach', 'wear', 'glasses']
-    }
-    
-    # Verificăm fiecare set de cuvinte cheie
-    for op_type, key_words in keywords.items():
-        for word in key_words:
-            if word in prompt:
-                # Încercăm să extragem ținta și atributul
-                target = ''
-                attribute = ''
-                
-                if op_type == 'remove':
-                    # Pentru remove, încercăm să găsim ce urmează după cuvântul cheie
-                    match = re.search(f"{word}\\s+(the\\s+)?([a-z\\s]+)", prompt)
-                    if match:
-                        target = match.group(2).strip()
-                elif op_type == 'color':
-                    # Pentru color, încercăm să găsim obiectul și culoarea
-                    match = re.search(f"{word}\\s+(the\\s+)?([a-z\\s]+)\\s+to\\s+([a-z\\s]+)", prompt)
-                    if match:
-                        target = match.group(2).strip()
-                        attribute = match.group(3).strip()
-                elif op_type == 'replace' or op_type == 'background':
-                    # Pentru replace/background, încercăm să găsim "with" sau "to"
-                    match = re.search(f"(with|to)\\s+([a-z\\s]+)", prompt)
-                    if match:
-                        attribute = match.group(2).strip()
-                elif op_type == 'add':
-                    # Pentru add, tot ce urmează după cuvântul cheie
-                    match = re.search(f"{word}\\s+(a\\s+)?([a-z\\s]+)", prompt)
-                    if match:
-                        attribute = match.group(2).strip()
-                
-                return {
-                    'type': op_type,
-                    'target': target,
-                    'attribute': attribute,
-                    'confidence': 0.7
-                }
-    
-    return None
+        Args:
+            prompt: Promptul de analizat
+            
+        Returns:
+            Dicționar cu informații despre operație sau None
+        """
+        # Cuvinte cheie pentru fiecare tip de operație
+        keywords = {
+            'remove': ['remove', 'delete', 'erase', 'eliminate', 'get rid', 'take out'],
+            'replace': ['replace', 'swap', 'change', 'substitute', 'switch'],
+            'color': ['color', 'recolor', 'hue', 'tint', 'shade'],
+            'background': ['background', 'backdrop', 'scene', 'setting', 'environment'],
+            'add': ['add', 'place', 'put', 'insert', 'include', 'attach', 'wear', 'glasses']
+        }
+        
+        # Verificăm fiecare set de cuvinte cheie
+        for op_type, key_words in keywords.items():
+            for word in key_words:
+                if word in prompt:
+                    # Încercăm să extragem ținta și atributul
+                    target = ''
+                    attribute = ''
+                    
+                    if op_type == 'remove':
+                        # Pentru remove, încercăm să găsim ce urmează după cuvântul cheie
+                        match = re.search(f"{word}\\s+(the\\s+)?([a-z\\s]+)", prompt)
+                        if match:
+                            target = match.group(2).strip()
+                    elif op_type == 'color':
+                        # Pentru color, încercăm să găsim obiectul și culoarea
+                        match = re.search(f"{word}\\s+(the\\s+)?([a-z\\s]+)\\s+to\\s+([a-z\\s]+)", prompt)
+                        if match:
+                            target = match.group(2).strip()
+                            attribute = match.group(3).strip()
+                    elif op_type == 'replace' or op_type == 'background':
+                        # Pentru replace/background, încercăm să găsim "with" sau "to"
+                        match = re.search(f"(with|to)\\s+([a-z\\s]+)", prompt)
+                        if match:
+                            attribute = match.group(2).strip()
+                    elif op_type == 'add':
+                        # Pentru add, tot ce urmează după cuvântul cheie
+                        match = re.search(f"{word}\\s+(a\\s+)?([a-z\\s]+)", prompt)
+                        if match:
+                            attribute = match.group(2).strip()
+                    
+                    return {
+                        'type': op_type,
+                        'target': target,
+                        'attribute': attribute,
+                        'confidence': 0.7
+                    }
+        
+        return None
 class ImageAnalyzer:
     """
     Analizator pentru imaginile de intrare
