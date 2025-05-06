@@ -59,7 +59,7 @@ def main():
     
     # Configurăm logging-ul
     log_level = logging.DEBUG if args.debug else logging.INFO
-    logger = AppConfig.setup_logging(level=log_level)
+    logger = AppConfig.setup_logging()
     
     # Configurări speciale
     if args.low_vram:

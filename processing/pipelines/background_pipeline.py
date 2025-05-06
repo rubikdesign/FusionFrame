@@ -11,8 +11,8 @@ import numpy as np
 from typing import Dict, Any, Optional, Union, Tuple, Callable
 from PIL import Image
 
-from fusionframe.processing.pipelines.base_pipeline import BasePipeline
-from fusionframe.processing.analyzer import OperationAnalyzer
+from processing.pipelines.base_pipeline import BasePipeline
+from processing.analyzer import OperationAnalyzer
 
 # Setăm logger-ul
 logger = logging.getLogger(__name__)

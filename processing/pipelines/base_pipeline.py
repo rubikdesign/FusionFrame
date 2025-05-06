@@ -11,10 +11,10 @@ from typing import Dict, Any, Optional, Union, Tuple, Callable
 import numpy as np
 from PIL import Image
 
-from fusionframe.config.app_config import AppConfig
-from fusionframe.core.model_manager import ModelManager
-from fusionframe.processing.analyzer import ImageAnalyzer
-from fusionframe.processing.mask_generator import MaskGenerator
+from config.app_config import AppConfig
+from core.model_manager import ModelManager
+from processing.analyzer import ImageAnalyzer
+from processing.mask_generator import MaskGenerator
 
 # Setăm logger-ul
 logger = logging.getLogger(__name__)

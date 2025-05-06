@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-
 """
 Configurații generale pentru aplicația FusionFrame 2.0
 """
-
 import os
 import torch
+import logging  # Adăugat importul pentru logging
 from pathlib import Path
 
 class AppConfig:
@@ -68,17 +67,15 @@ class AppConfig:
         Path(cls.OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
     
     @classmethod
-    def setup_logging(cls):
+    def setup_logging(cls, level=logging.INFO):
         """Configurează sistemul de logging"""
-        import logging
-        
         # Asigură existența directorului pentru log-uri
         Path(cls.LOGS_DIR).mkdir(parents=True, exist_ok=True)
         
         # Configurează logging-ul general
-        log_file = os.path.join(cls.LOGS_DIR, "logs")
+        log_file = os.path.join(cls.LOGS_DIR, "fusionframe.log")
         logging.basicConfig(
-            level=logging.INFO,
+            level=level,  # Folosim parametrul primit
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             handlers=[
                 logging.FileHandler(log_file),

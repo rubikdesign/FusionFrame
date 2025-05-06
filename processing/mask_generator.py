@@ -113,7 +113,7 @@ class MaskGenerator:
                     text_prompt = operation.get('target')
                 elif operation.get('type') == 'color' and operation.get('target'):
                     text_prompt = operation.get('target')
-                elif operation.get('type') == 'remove') and operation.get('target'):
+                elif operation.get('type') == 'remove' and operation.get('target'):
                     text_prompt = operation.get('target')
             
             # Trimitem sarcina SAM
@@ -369,10 +369,10 @@ class MaskGenerator:
             input_fixed = {}
             # Implementare FusionFrame 2.0
             # Încercăm să corectăm forma măștii
-                if len(mask.shape) > 2:
-                    mask = mask[0] if mask.shape[0] == 1 else np.mean(mask, axis=0)
-                else:
-                    return None
+            if len(mask.shape) > 2:
+                mask = mask[0] if mask.shape[0] == 1 else np.mean(mask, axis=0)
+            else:
+                return None
             
             # Redimensionare sigură
             return self._safe_resize(mask, (image_np.shape[1], image_np.shape[0]))
