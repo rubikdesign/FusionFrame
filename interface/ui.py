@@ -3,6 +3,7 @@
 
 """
 Interfața Gradio pentru FusionFrame 2.0
+(Actualizat pentru a include apelul la PostProcessor)
 """
 
 import os
@@ -14,72 +15,51 @@ import time
 from typing import Dict, Any, List, Optional, Union, Tuple
 from PIL import Image
 import cv2 # Adăugat pentru normalizarea depth map
+import traceback # Pentru afișare erori
 
 # Asigurăm căile corecte pentru importuri
 try:
-    # Încercăm importurile directe (structură standard)
     from config.app_config import AppConfig
     from core.model_manager import ModelManager
     from core.pipeline_manager import PipelineManager
     from processing.analyzer import OperationAnalyzer, ImageAnalyzer
-    # Presupunem că acestea există în directorul 'interface' sau sunt în PYTHONPATH
-    # Verificăm existența fișierelor opționale
+    # NOU: Importăm PostProcessor
+    from processing.post_processor import PostProcessor
+
+    # Verificăm existența fișierelor opționale de interfață
     components_path = os.path.join(os.path.dirname(__file__), 'components.py')
     styles_path = os.path.join(os.path.dirname(__file__), 'styles.py')
 
-    if os.path.exists(components_path):
-         from interface.components import create_examples, create_advanced_settings_panel
-    else:
-         create_examples, create_advanced_settings_panel = None, None
-         logging.warning(f"Optional file not found: {components_path}. Using fallbacks.")
+    if os.path.exists(components_path): from interface.components import create_examples, create_advanced_settings_panel
+    else: create_examples, create_advanced_settings_panel = None, None; logging.warning(f"Optional UI file not found: {components_path}. Using fallbacks.")
 
-    if os.path.exists(styles_path):
-         from interface.styles import CSS_STYLES
-    else:
-         CSS_STYLES = ""
-         logging.warning(f"Optional file not found: {styles_path}. Using fallbacks.")
+    if os.path.exists(styles_path): from interface.styles import CSS_STYLES
+    else: CSS_STYLES = ""; logging.warning(f"Optional UI file not found: {styles_path}. Using fallbacks.")
 
-except ImportError:
-    # Fallback: Adăugăm directorul rădăcină al proiectului în PYTHONPATH
+except ImportError as e:
+    # Fallback: Adăugăm directorul rădăcină în PYTHONPATH
     current_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.dirname(os.path.dirname(current_dir))
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
-        print(f"Added project root to sys.path: {project_root}") # Debug print
-
+    if project_root not in sys.path: sys.path.insert(0, project_root); print(f"Added project root to sys.path: {project_root}")
     # Reîncercăm importurile
     try:
         from config.app_config import AppConfig
         from core.model_manager import ModelManager
         from core.pipeline_manager import PipelineManager
         from processing.analyzer import OperationAnalyzer, ImageAnalyzer
+        from processing.post_processor import PostProcessor # Reîncercăm și PostProcessor
 
-        components_path = os.path.join(os.path.dirname(__file__), 'components.py')
-        styles_path = os.path.join(os.path.dirname(__file__), 'styles.py')
-
-        if os.path.exists(components_path):
-             from interface.components import create_examples, create_advanced_settings_panel
-        else:
-             create_examples, create_advanced_settings_panel = None, None
-             logging.warning(f"Optional file not found: {components_path}. Using fallbacks.")
-
-        if os.path.exists(styles_path):
-             from interface.styles import CSS_STYLES
-        else:
-             CSS_STYLES = ""
-             logging.warning(f"Optional file not found: {styles_path}. Using fallbacks.")
+        if os.path.exists(components_path): from interface.components import create_examples, create_advanced_settings_panel
+        else: create_examples, create_advanced_settings_panel = None, None; logging.warning(f"Optional UI file not found: {components_path}. Using fallbacks.")
+        if os.path.exists(styles_path): from interface.styles import CSS_STYLES
+        else: CSS_STYLES = ""; logging.warning(f"Optional UI file not found: {styles_path}. Using fallbacks.")
 
     except ImportError as e_retry:
-         print(f"FATAL: Could not import necessary modules even after adjusting sys.path. Error: {e_retry}")
-         print(f"Current sys.path: {sys.path}")
-         print("Please ensure the project structure is correct and all modules are accessible.")
-         sys.exit(1)
-
+         print(f"FATAL: Could not import necessary modules. Error: {e_retry}"); print(f"sys.path: {sys.path}"); sys.exit(1)
 
 # Setăm logger-ul principal
 logger = logging.getLogger(__name__)
-if not logger.hasHandlers():
-     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+if not logger.hasHandlers(): logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
 
 class FusionFrameUI:
@@ -91,42 +71,37 @@ class FusionFrameUI:
         self.pipeline_manager = PipelineManager()
         self.op_analyzer = OperationAnalyzer()
         self.img_analyzer = ImageAnalyzer()
+        # NOU: Instanțiem PostProcessor aici, presupunând că nu are stare complexă
+        # Alternativ, poate fi instanțiat în process_image_gradio_wrapper la nevoie
+        self.post_processor = PostProcessor()
 
         self.load_models()
         self.app = self.create_interface()
         logger.info("FusionFrameUI initialized successfully.")
 
     def load_models(self):
-        """Încarcă modelele esențiale la pornire (sau verifică dacă sunt încărcate)."""
+        """Încarcă/verifică modelele esențiale."""
         logger.info("Loading/Checking essential models...")
         try:
-            # Verificăm/încărcăm modelul principal
             main_model = self.model_manager.get_model('main')
-            if main_model and getattr(main_model, 'is_loaded', False):
-                 logger.info("Main model confirmed loaded.")
-            else:
-                 logger.warning("Main model check/load initiated. Check logs for status.")
-            # Putem adăuga verificări similare și pentru alte modele esențiale dacă dorim
-            # self.model_manager.get_model('sam')
-            # self.model_manager.get_model('clipseg')
+            if main_model and getattr(main_model, 'is_loaded', False): logger.info("Main model confirmed loaded.")
+            else: logger.warning("Main model check/load initiated or failed. Check logs.")
+            # Verificăm/încărcăm și modelele necesare pentru PostProcessor (dacă e cazul)
+            # self.model_manager.get_model('esrgan') # Exemplu, încărcarea se face lazy în PostProcessor
+            # self.model_manager.get_model('gpen')
         except Exception as e:
-            logger.error(f"Error during essential models loading sequence: {str(e)}", exc_info=True)
-            logger.warning("Some features might be limited due to model loading issues.")
+            logger.error(f"Error during models loading: {str(e)}", exc_info=True)
 
     def create_interface(self) -> gr.Blocks:
         """Creează interfața Gradio."""
         logger.info("Creating Gradio interface...")
-        # Folosim valorile CSS importate sau default ""
-        global CSS_STYLES
-        css_to_use = CSS_STYLES if 'CSS_STYLES' in globals() else ""
+        global CSS_STYLES; css_to_use = CSS_STYLES if 'CSS_STYLES' in globals() else ""
 
         with gr.Blocks(theme=gr.themes.Soft(), css=css_to_use) as app:
-            gr.Markdown(
-                f"# 🚀 FusionFrame {self.config.VERSION} - Advanced AI Image Editor"
-            )
+            gr.Markdown(f"# 🚀 FusionFrame {self.config.VERSION} - Advanced AI Image Editor")
 
             with gr.Row(equal_height=False):
-                with gr.Column(scale=1):
+                with gr.Column(scale=1): # Coloana Input
                     image_input = gr.Image(type="pil", label="Upload Image", elem_id="image_input", height=400)
                     with gr.Row():
                         prompt = gr.Textbox(label="Edit Instructions", placeholder="E.g., 'Remove the car'", elem_id="prompt-input", scale=3)
@@ -134,75 +109,56 @@ class FusionFrameUI:
                     run_btn = gr.Button("Generate Edit", variant="primary", elem_id="generate-btn")
                     status_area = gr.Textbox(label="Status", value="Ready.", elem_id="status-area", interactive=False, lines=2)
 
-                with gr.Column(scale=1):
+                with gr.Column(scale=1): # Coloana Output
                     image_output = gr.Image(label="Edited Result", elem_id="image_output", height=400)
                     with gr.Row():
                         mask_output = gr.Image(label="Generated Mask (Debug)", elem_id="mask_output", height=200)
-                        depth_output = gr.Image(label="Depth Map (Debug)", elem_id="depth_output", height=200) # Păstrăm vizualizarea hărții de adâncime
-                    with gr.Accordion("Operation Details & Analysis", open=False): # Redenumit
-                        info_json = gr.JSON(label="Operation & Context Info") # Redenumit
+                        depth_output = gr.Image(label="Depth Map (Debug)", elem_id="depth_output", height=200)
+                    with gr.Accordion("Operation Details & Analysis", open=False):
+                        info_json = gr.JSON(label="Operation & Context Info")
 
             # Secțiune exemple
             global create_examples
-            if create_examples:
-                # Presupunem că create_examples returnează lista direct
-                example_list = create_examples() if callable(create_examples) else []
-                if example_list:
-                     gr.Examples(examples=example_list, inputs=[prompt, strength], label="Example Prompts")
-            else:
-                logger.warning("create_examples function not available. Skipping example UI.")
+            if create_examples and callable(create_examples):
+                example_list = create_examples(); gr.Examples(examples=example_list, inputs=[prompt, strength], label="Example Prompts")
+            else: logger.warning("create_examples function not available.")
 
             # Panou de setări avansate
-            with gr.Accordion("Advanced Settings", open=False):
+            with gr.Accordion("Advanced Settings & Post-Processing", open=False): # Redenumit
                 global create_advanced_settings_panel
+                # Obținem lista de componente din create_advanced_settings_panel
                 if create_advanced_settings_panel and callable(create_advanced_settings_panel):
-                    advanced_settings_inputs = create_advanced_settings_panel()
-                    if not isinstance(advanced_settings_inputs, list):
-                         logger.error("create_advanced_settings_panel did not return a list. Fallback.")
-                         advanced_settings_inputs = self._create_fallback_advanced_settings()
+                    advanced_settings_list = create_advanced_settings_panel()
+                    if not isinstance(advanced_settings_list, list):
+                         logger.error("create_advanced_settings_panel fallback needed."); advanced_settings_list = self._create_fallback_advanced_settings()
                 else:
-                    logger.warning("create_advanced_settings_panel function not available. Using fallback.")
-                    advanced_settings_inputs = self._create_fallback_advanced_settings()
+                    logger.warning("create_advanced_settings_panel not available. Using fallback."); advanced_settings_list = self._create_fallback_advanced_settings()
 
-                # Asigurăm logica de vizibilitate pentru refiner strength, chiar și în fallback
-                use_refiner_component = None
-                refiner_strength_component = None
-                # Găsim componentele relevante (presupunând o ordine sau folosind label-ul)
-                for component in advanced_settings_inputs:
-                    if isinstance(component, (gr.Checkbox)) and "Refiner" in getattr(component, 'label', ''):
-                        use_refiner_component = component
-                    if isinstance(component, (gr.Slider)) and "Refiner Strength" in getattr(component, 'label', ''):
-                        refiner_strength_component = component
+                # NOU: Adăugăm controale specifice pentru Post-Processing dacă nu există deja
+                # Verificăm dacă există deja controale pentru blending/harmonization
+                has_blend_ctrl = any("Blend" in getattr(c, 'label', '') for c in advanced_settings_list if isinstance(c, gr.Checkbox))
+                has_harmonize_ctrl = any("Harmoniz" in getattr(c, 'label', '') for c in advanced_settings_list if isinstance(c, gr.Checkbox))
 
-                if use_refiner_component and refiner_strength_component:
-                    use_refiner_component.change(
-                         fn=lambda x: gr.update(visible=x),
-                         inputs=[use_refiner_component],
-                         outputs=[refiner_strength_component]
-                    )
-                else:
-                     logger.warning("Could not find Use Refiner or Refiner Strength components to link visibility.")
+                # Creăm controalele de post-procesare dacă lipsesc
+                post_proc_controls = []
+                if not has_blend_ctrl: post_proc_controls.append(gr.Checkbox(label="Seamless Blending", value=True, info="Smooth edges between edited and original areas."))
+                if not has_harmonize_ctrl: post_proc_controls.append(gr.Checkbox(label="Color Harmonization", value=True, info="Adjust colors in edited area to match the original."))
+
+                # Adăugăm controalele noi la listă dacă am creat vreunul
+                if post_proc_controls:
+                     with gr.Row(): # Le punem într-un rând nou
+                         for ctrl in post_proc_controls: ctrl.render() # Render explicit dacă le adăugăm dinamic
+                     advanced_settings_list.extend(post_proc_controls) # Adăugăm la lista de inputuri
+
+                # Linkăm vizibilitatea refiner strength (presupunând ordinea sau label-ul)
+                self._link_refiner_visibility(advanced_settings_list)
 
 
             # Panou de informații
-            with gr.Accordion("Tips & Info", open=False):
-                 gr.Markdown("""
-                 ### Tips for better results:
-                 - Be specific: "remove the *red* car on the *left*" vs "remove car".
-                 - For replacements, specify what to replace with.
-                 - Adjust strength slider for more/less dramatic changes.
-                 - Check the generated mask/depth map (debug view).
-
-                 ### Common operations:
-                 - **Remove**: "remove [object]"
-                 - **Replace**: "replace [object] with [new object]"
-                 - **Color**: "change color of [object] to [color]"
-                 - **Background**: "change background to [scene]"
-                 - **Add**: "add [object]"
-                 """)
+            with gr.Accordion("Tips & Info", open=False): gr.Markdown(self._get_tips_markdown())
 
             # Funcționalitate buton
-            active_advanced_settings = advanced_settings_inputs if isinstance(advanced_settings_inputs, list) else []
+            active_advanced_settings = advanced_settings_list if isinstance(advanced_settings_list, list) else []
             run_btn.click(
                 fn=self.process_image_gradio_wrapper,
                 inputs=[image_input, prompt, strength] + active_advanced_settings,
@@ -212,113 +168,191 @@ class FusionFrameUI:
         logger.info("Gradio interface created.")
         return app
 
-    def _create_fallback_advanced_settings(self) -> List[gr.components.Component]:
-         """Creează o listă de componente default pentru setări avansate."""
-         # Preluăm valorile default din AppConfig sau setăm unele generice
-         default_steps = getattr(self.config, 'DEFAULT_STEPS', 50)
-         default_guidance = getattr(self.config, 'DEFAULT_GUIDANCE_SCALE', 7.5)
-         default_use_refiner = getattr(self.config, 'USE_REFINER', True)
-         default_refiner_strength = getattr(self.config, 'REFINER_STRENGTH', 0.3)
+    def _link_refiner_visibility(self, components_list):
+         """Leagă vizibilitatea slider-ului de refiner strength de checkbox-ul use_refiner."""
+         use_refiner_comp = None; strength_comp = None
+         for c in components_list:
+             label = getattr(c, 'label', '').lower()
+             if isinstance(c, gr.Checkbox) and 'refiner' in label: use_refiner_comp = c
+             if isinstance(c, gr.Slider) and 'refiner strength' in label: strength_comp = c
+         if use_refiner_comp and strength_comp:
+              use_refiner_comp.change(lambda x: gr.update(visible=x), inputs=[use_refiner_comp], outputs=[strength_comp])
+         else: logger.warning("Could not link refiner visibility.")
 
-         return [
-             gr.Slider(minimum=10, maximum=150, value=default_steps, step=1, label="Inference Steps"),
-             gr.Slider(minimum=1.0, maximum=20.0, value=default_guidance, step=0.5, label="Guidance Scale"),
-             gr.Checkbox(label="Enhance Details", value=True), # Lăsăm checkbourile, chiar dacă post-proc nu e fully integrat
-             gr.Checkbox(label="Fix Faces", value=True),
-             gr.Checkbox(label="Remove Artifacts", value=True),
-             gr.Checkbox(label="Use ControlNet", value=True),
-             gr.Checkbox(label="Use Refiner", value=default_use_refiner),
-             gr.Slider(minimum=0.0, maximum=1.0, value=default_refiner_strength, step=0.05, label="Refiner Strength", visible=default_use_refiner)
-         ]
+    def _get_tips_markdown(self):
+         """Returnează textul Markdown pentru secțiunea Tips."""
+         return """
+         ### Tips for better results:
+         - Be specific: "remove the *red* car on the *left*" vs "remove car".
+         - For replacements, specify what to replace with.
+         - Adjust strength slider for more/less dramatic changes.
+         - Check the generated mask/depth map (debug view).
+         - Enable Post-Processing options in Advanced Settings for better integration.
+
+         ### Common operations:
+         - **Remove**: "remove [object]"
+         - **Replace**: "replace [object] with [new object]"
+         - **Color**: "change color of [object] to [color]"
+         - **Background**: "change background to [scene]"
+         - **Add**: "add [object]"
+         """
+
+    def _create_fallback_advanced_settings(self) -> List[gr.components.Component]:
+         """Creează controale default pentru setări avansate și post-procesare."""
+         # Valori Default
+         cfg = self.config
+         steps = getattr(cfg, 'DEFAULT_STEPS', 50); guidance = getattr(cfg, 'DEFAULT_GUIDANCE_SCALE', 7.5)
+         use_refiner = getattr(cfg, 'USE_REFINER', True); ref_strength = getattr(cfg, 'REFINER_STRENGTH', 0.3)
+
+         # Componente Gradio
+         comps = []
+         with gr.Row():
+             comps.append(gr.Slider(minimum=10, maximum=150, value=steps, step=1, label="Inference Steps"))
+             comps.append(gr.Slider(minimum=1.0, maximum=20.0, value=guidance, step=0.5, label="Guidance Scale"))
+         with gr.Row():
+             comps.append(gr.Checkbox(label="Enhance Details", value=True))
+             comps.append(gr.Checkbox(label="Fix Faces", value=True))
+             comps.append(gr.Checkbox(label="Remove Artifacts", value=True))
+         with gr.Row():
+             comps.append(gr.Checkbox(label="Use ControlNet", value=True))
+             comps.append(gr.Checkbox(label="Use Refiner", value=use_refiner))
+             comps.append(gr.Slider(minimum=0.0, maximum=1.0, value=ref_strength, step=0.05, label="Refiner Strength", visible=use_refiner))
+         # NOU: Adăugăm controale Post-Processing
+         with gr.Row():
+             comps.append(gr.Checkbox(label="Seamless Blending", value=True, info="Smooth edges."))
+             comps.append(gr.Checkbox(label="Color Harmonization", value=True, info="Adjust colors."))
+
+         return comps
+
 
     def process_image_gradio_wrapper(self, *args):
-        """Wrapper pentru Gradio pentru a gestiona actualizări de status și output-uri multiple."""
+        """Wrapper Gradio: gestionează input/output și apelează procesarea + post-procesarea."""
         start_time_wrapper = time.time()
         image_pil, prompt_text, strength_value, *advanced_args_tuple = args
-        advanced_args = list(advanced_args_tuple) # Convertim tuplul în listă
+        advanced_args = list(advanced_args_tuple)
 
-        # Mapare argumente avansate
+        # --- Mapare Argumente Avansate ---
+        # Asigurăm că numele corespund celor din _create_fallback_advanced_settings / components.py
+        # Ordinea este importantă!
         param_names = [
-            "num_inference_steps", "guidance_scale", "enhance_details",
-            "fix_faces", "remove_artifacts", "use_controlnet",
-            "use_refiner", "refiner_strength"
+            "num_inference_steps", "guidance_scale", "enhance_details", "fix_faces",
+            "remove_artifacts", "use_controlnet", "use_refiner", "refiner_strength",
+            "seamless_blending", "color_harmonization" # NOU: Parametri Post-Processing
         ]
         kwargs_for_processing = {}
-        # Asigurăm că avem suficiente valori default dacă advanced_args e mai scurtă
         num_expected_advanced = len(param_names)
-        advanced_args.extend([None] * (num_expected_advanced - len(advanced_args)))
+        advanced_args.extend([None] * (num_expected_advanced - len(advanced_args))) # Padding cu None
 
         for i, name in enumerate(param_names):
-             # Prioritizăm valoarea din UI dacă nu e None, altfel None (process_image va folosi default)
-            kwargs_for_processing[name] = advanced_args[i]
+            kwargs_for_processing[name] = advanced_args[i] # None va lăsa default-ul din funcție
 
-        logger.info(f"Processing request: Prompt='{prompt_text}', Strength={strength_value}, AdvancedKwargs={kwargs_for_processing}")
+        logger.info(f"Processing request: Prompt='{prompt_text}', Strength={strength_value}")
+        logger.debug(f"Advanced Kwargs received: {kwargs_for_processing}")
 
-        # Status inițial
+        # --- Status Inițial & Validări ---
         yield None, None, None, {}, "Status: Starting..."
+        if image_pil is None: yield None, None, None, {"error": "No image"}, "Error: Upload image."; return
+        if not prompt_text or not prompt_text.strip(): yield image_pil, None, None, {"warning": "Empty prompt"}, "Warning: Prompt empty."; return
 
-        # Validări input
-        if image_pil is None:
-            yield None, None, None, {"error": "No image provided"}, "Error: Please upload an image."
-            return
-        if not prompt_text or not prompt_text.strip():
-            yield image_pil, None, None, {"warning": "Empty prompt"}, "Warning: Prompt is empty."
-            return
+        # --- Asigurare Model Principal ---
+        if not (self.model_manager.get_model('main') and getattr(self.model_manager.get_model('main'), 'is_loaded', False)):
+            error_msg = "Critical: Main model not loaded."; logger.error(error_msg)
+            yield image_pil, None, None, {"error": error_msg}, error_msg; return
 
-        # Asigurare model principal
-        main_model = self.model_manager.get_model('main')
-        if not main_model or not getattr(main_model, 'is_loaded', False): # Verificare mai robustă
-            error_msg = "Critical: Main processing model failed to load or is not available."
-            logger.error(error_msg)
-            yield image_pil, None, None, {"error": error_msg}, error_msg
-            return
+        # --- Procesare Principală (Pipeline) ---
+        final_result_img = image_pil # Imaginea de returnat (inițial originală)
+        mask_img_pipeline = None
+        depth_map_display = None
+        op_info = {}
+        context_info = {}
+        status_msg = "Starting pipeline..."
+        success_pipeline = False
+        post_proc_applied = False
+        pipeline_result_dict = None
 
-        # Procesare efectivă
         try:
-            result_dict = self.process_image(image_pil, prompt_text, strength_value, **kwargs_for_processing)
+            # Pasează kwargs direct la process_image (care le pasează la pipeline)
+            pipeline_result_dict = self.process_image(image_pil, prompt_text, strength_value, **kwargs_for_processing)
 
-            result_img = result_dict.get('result_image')
-            mask_img = result_dict.get('mask_image')
-            op_info = result_dict.get('operation_info', {})
-            context_info = result_dict.get('context_info', {})
-            status_msg = result_dict.get('status_message', "Finished.")
-            success = result_dict.get('success', False)
+            # Extragem rezultatele din pipeline
+            final_result_img = pipeline_result_dict.get('result_image', image_pil) # Folosim ce returnează pipeline-ul
+            mask_img_pipeline = pipeline_result_dict.get('mask_image') # Poate fi None
+            op_info = pipeline_result_dict.get('operation_info', {})
+            context_info = pipeline_result_dict.get('context_info', {})
+            status_msg = pipeline_result_dict.get('status_message', "Pipeline finished.")
+            success_pipeline = pipeline_result_dict.get('success', False)
 
-            # Combinăm info pentru JSON
-            final_info_json = {
-                 "Operation Analysis": op_info,
-                 "Image Context Analysis": context_info, # Includem tot contextul
-                 "Processing Status": "Success" if success else "Failed"
-            }
-            if not success and "error" not in final_info_json["Operation Analysis"]:
-                 final_info_json["Operation Analysis"]["error"] = status_msg # Adăugăm mesajul de eroare dacă lipsește
+            # --- NOU: Apel Post-Processor Condiționat ---
+            if success_pipeline and final_result_img:
+                # Verificăm flag-urile de post-procesare din kwargs_for_processing
+                should_post_process = any(kwargs_for_processing.get(flag) for flag in
+                                          ["enhance_details", "fix_faces", "remove_artifacts",
+                                           "seamless_blending", "color_harmonization"])
+                                           
+                # Asigurăm valori default True pentru blend/harmonize dacă nu sunt specificate altfel
+                # (dacă nu există checkbox-uri, vor fi None, deci folosim True)
+                blend_flag = kwargs_for_processing.get('seamless_blending') if kwargs_for_processing.get('seamless_blending') is not None else True
+                harmonize_flag = kwargs_for_processing.get('color_harmonization') if kwargs_for_processing.get('color_harmonization') is not None else True
+                
+                if should_post_process or blend_flag or harmonize_flag:
+                     logger.info("Applying post-processing steps...")
+                     status_msg += " Applying post-processing..."
+                     # Actualizăm statusul în UI (yield-ul intermediar e o opțiune aici)
+                     yield final_result_img, mask_img_pipeline, depth_map_display, {"status": "Post-processing..."}, status_msg
 
-            # Pregătim depth map pentru afișare
-            depth_map_display = None
+                     post_proc_kwargs = {
+                         "image": final_result_img, # Imaginea de la pipeline
+                         "original_image": image_pil, # Originalul
+                         "mask": mask_img_pipeline, # Masca de la pipeline
+                         "operation_type": op_info.get('type'),
+                         "enhance_details": kwargs_for_processing.get('enhance_details', False),
+                         "fix_faces": kwargs_for_processing.get('fix_faces', False),
+                         "remove_artifacts": kwargs_for_processing.get('remove_artifacts', False),
+                         "seamless_blending": blend_flag,
+                         "color_harmonization": harmonize_flag,
+                         # "progress_callback": ?? # Necesită integrare cu gr.Progress
+                     }
+
+                     try:
+                         post_result_dict = self.post_processor.process(**post_proc_kwargs)
+                         if post_result_dict.get('success'):
+                             final_result_img = post_result_dict.get('result_image', final_result_img) # Actualizăm cu rezultatul PP
+                             status_msg = status_msg.replace("Applying post-processing...", post_result_dict.get('message', 'Post-processing applied.'))
+                             post_proc_applied = True
+                             logger.info("Post-processing applied successfully.")
+                         else:
+                             status_msg += f" Post-processing failed: {post_result_dict.get('message')}"
+                             logger.warning(f"Post-processing failed: {post_result_dict.get('message')}")
+                     except Exception as e_pp:
+                          status_msg += f" Post-processing error: {e_pp}"
+                          logger.error(f"Error during PostProcessor call: {e_pp}", exc_info=True)
+            # --- Sfârșit Apel Post-Processor ---
+
+            # Pregătim afișare depth map (ca înainte)
             if context_info and context_info.get('spatial_info', {}).get('depth_map_available'):
                  depth_map_np = context_info['spatial_info']['depth_map']
                  if depth_map_np is not None:
-                      # Normalizăm explicit la 0-255 uint8 pentru afișare
-                      depth_map_normalized = cv2.normalize(depth_map_np, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-                      # Aplicăm o colormapă pentru vizualizare mai bună (opțional)
-                      # depth_map_color = cv2.applyColorMap(depth_map_normalized, cv2.COLORMAP_VIRIDIS)
-                      # depth_map_display = Image.fromarray(cv2.cvtColor(depth_map_color, cv2.COLOR_BGR2RGB))
-                      # Sau afișăm grayscale direct
-                      depth_map_display = Image.fromarray(depth_map_normalized)
+                      depth_map_norm = cv2.normalize(depth_map_np, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+                      depth_map_display = Image.fromarray(depth_map_norm)
 
+            # JSON final
+            final_info_json = { "Operation Analysis": op_info, "Image Context Analysis": context_info,
+                                "Processing Status": "Success" if success_pipeline else "Failed",
+                                "PostProcessing Applied": post_proc_applied }
+            if not success_pipeline and "error" not in final_info_json["Operation Analysis"]:
+                 final_info_json["Operation Analysis"]["error"] = status_msg
 
             processing_time = time.time() - start_time_wrapper
             status_msg += f" (Total UI time: {processing_time:.2f}s)"
-            logger.info(f"Request finished. Status: {'Success' if success else 'Failed'}. {status_msg}")
+            logger.info(f"Request finished. Pipeline Success: {success_pipeline}, PostProc Applied: {post_proc_applied}. {status_msg}")
 
-            # Actualizăm UI
-            yield result_img, mask_img, depth_map_display, final_info_json, status_msg
+            # Actualizăm UI cu imaginea finală (posibil post-procesată)
+            yield final_result_img, mask_img_pipeline, depth_map_display, final_info_json, status_msg
 
         except Exception as e:
             error_message = f"Critical error in UI processing wrapper: {str(e)}"
             logger.error(error_message, exc_info=True)
-            import traceback
-            # Încercăm să returnăm imaginea originală și eroarea
+            # Returnăm imaginea originală și eroarea
             yield image_pil, None, None, {"error": error_message, "traceback": traceback.format_exc()}, error_message
 
 
@@ -327,126 +361,86 @@ class FusionFrameUI:
                       prompt: str,
                       strength: float,
                       **kwargs) -> Dict[str, Any]:
-        """Procesează imaginea și returnează un dicționar cu toate rezultatele."""
+        """Orchestrează analiza și apelarea pipeline-ului corespunzător."""
         start_time_process = time.time()
-        logger.info(f"Starting process_image: Prompt='{prompt}', Strength={strength}, Kwargs={kwargs}")
+        logger.info(f"Process_image started. Kwargs: {kwargs}")
 
-        results = {
+        results = { # Dicționarul returnat de pipeline-uri ar trebui să aibă această structură
             'result_image': image, 'mask_image': None, 'operation_info': {},
             'context_info': {}, 'status_message': "Processing started.", 'success': False
         }
 
         try:
-            # --- 1. Analiza Operației ---
+            # 1. Analiza Operației (din prompt)
             operation_details = self.op_analyzer.analyze_operation(prompt)
             results['operation_info'] = operation_details
-            logger.debug(f"Operation analysis: {operation_details}")
 
-            # --- 2. Analiza Contextului Imaginii ---
-            logger.debug("Starting image context analysis...")
+            # 2. Analiza Contextului Imaginii
             image_context = self.img_analyzer.analyze_image_context(image)
             results['context_info'] = image_context
+            # Logarea contextului (ca înainte)
+            self._log_image_context(image_context)
+            if "error" in image_context: logger.error(f"Context analysis error: {image_context['error']}")
 
-            # --- LOGURI ADAUGATE ---
-            logger.info("--- Image Context Analysis Results ---")
-            logger.info(f"  Analysis Time: {image_context.get('analysis_time_sec', 'N/A')}s")
-            # Scenă
-            scene_info = image_context.get('scene_info', {})
-            logger.info(f"  Scene Tag (ML): {scene_info.get('primary_scene_tag_ml', 'N/A')}")
-            logger.info(f"  Secondary Tags (ML): {scene_info.get('secondary_scene_tags_ml', [])}")
-            # Obiecte Detectate
-            detected_objects = scene_info.get('detected_objects', [])
-            if detected_objects:
-                 logger.info(f"  Detected Objects ({len(detected_objects)}):")
-                 for obj in detected_objects[:3]: # Afișăm primele 3
-                      logger.info(f"    - {obj.get('label', '?')} (Conf: {obj.get('confidence', 0):.2f})")
-                 if len(detected_objects) > 3: logger.info("    ...")
-            else:
-                 logger.info("  Detected Objects: None")
-            # Iluminare
-            lighting_info = image_context.get('lighting_conditions', {})
-            logger.info(f"  Lighting:")
-            logger.info(f"    - Brightness: {lighting_info.get('brightness_heuristic', 'N/A')}")
-            logger.info(f"    - Contrast: {lighting_info.get('contrast_heuristic', 'N/A')}")
-            logger.info(f"    - Temperature: {lighting_info.get('temperature_heuristic', 'N/A')}")
-            logger.info(f"    - Highlights: {lighting_info.get('highlights_pct', 0.0):.1f}%")
-            logger.info(f"    - Shadows: {lighting_info.get('shadows_pct', 0.0):.1f}%")
-            # Stil
-            style_info = image_context.get('style_and_quality', {})
-            logger.info(f"  Style (Heuristic): {style_info.get('visual_style_heuristic', 'N/A')}")
-            # Adâncime
-            depth_info = image_context.get('spatial_info', {})
-            logger.info(f"  Depth Map Available: {depth_info.get('depth_map_available', False)}")
-            if depth_info.get('depth_map_available'):
-                 logger.info(f"  Depth Characteristics: {depth_info.get('depth_characteristics', 'N/A')}")
-            logger.info(f"  Full Desc (Heuristic): {image_context.get('full_description_heuristic', 'N/A')}")
-            logger.info("--- End Image Context Analysis ---")
-            # --- END LOGURI ---
-
-            if "error" in image_context:
-                 logger.error(f"Error during image context analysis: {image_context['error']}")
-                 results['status_message'] = f"Error in context analysis: {image_context['error']}"
-                 # return results # Oprim? Depinde de cât de critică e analiza
-
-            # --- 3. Selectare Pipeline ---
-            operation_type = operation_details.get('type', 'general')
-            target_object = operation_details.get('target_object', '')
-            pipeline = self.pipeline_manager.get_pipeline_for_operation(operation_type, target_object)
-
+            # 3. Selectare Pipeline
+            op_type = operation_details.get('type', 'general')
+            target_obj = operation_details.get('target_object', '')
+            pipeline = self.pipeline_manager.get_pipeline_for_operation(op_type, target_obj)
             if not pipeline:
-                error_msg = f"No pipeline for op '{operation_type}' (target: '{target_object}')."
-                logger.error(error_msg)
-                results['status_message'] = error_msg
-                return results
+                 msg = f"No pipeline found for op '{op_type}' (target: '{target_obj}')."; logger.error(msg)
+                 results['message'] = msg; return results
 
             logger.info(f"Selected pipeline: {pipeline.__class__.__name__}")
 
-            # --- 4. Executare Pipeline ---
+            # 4. Executare Pipeline (pasează toți kwargs primiți)
             pipeline_kwargs = {
                 "image": image, "prompt": prompt, "strength": strength,
                 "operation": operation_details, "image_context": image_context,
-                "progress_callback": lambda p, desc: logger.debug(f"Pipeline Progress: {p*100:.0f}% - {desc}"),
-                **kwargs # Pasează toți parametrii avansati din UI
+                "progress_callback": lambda p, desc: logger.debug(f"Pipeline: {p*100:.0f}% - {desc}"),
+                **kwargs # Pasează num_steps, guidance, use_refiner, etc.
             }
-            pipeline_result = pipeline.process(**pipeline_kwargs)
+            pipeline_result_dict = pipeline.process(**pipeline_kwargs)
 
-            # --- 5. Procesare Rezultat Pipeline ---
-            if isinstance(pipeline_result, dict):
-                 results['result_image'] = pipeline_result.get('result_image', results['result_image'])
-                 results['mask_image'] = pipeline_result.get('mask_image')
-                 results['operation_info'] = pipeline_result.get('operation', results['operation_info'])
-                 results['status_message'] = pipeline_result.get('message', "Pipeline finished.")
-                 # Verificăm explicit succesul din pipeline, altfel presupunem eșec dacă lipsește
-                 results['success'] = pipeline_result.get('success', False)
-            else:
-                 # Tratăm cazul neașteptat în care pipeline-ul nu returnează dicționar
-                 logger.warning(f"Pipeline {pipeline.__class__.__name__} returned unexpected type: {type(pipeline_result)}")
-                 results['status_message'] = "Pipeline finished with unexpected return type."
-                 # Încercăm să vedem dacă e o imagine PIL
-                 if isinstance(pipeline_result, Image.Image):
-                      results['result_image'] = pipeline_result
-                      results['success'] = True # Asumăm succes în acest caz
-                 else:
-                      results['success'] = False
-
-
-            # --- 6. (TODO) Post-Procesare ---
-            # ... (logica de post-procesare va veni aici) ...
+            # Actualizăm dicționarul results cu ce a returnat pipeline-ul
+            results.update(pipeline_result_dict)
+            # Asigurăm că imaginea rezultată e PIL
+            if results.get('result_image') and isinstance(results['result_image'], np.ndarray):
+                 results['result_image'] = self._convert_cv2_to_pil(results['result_image']) # Helper de conversie
 
             processing_time_process = time.time() - start_time_process
-            results['status_message'] += f" (Processing time: {processing_time_process:.2f}s)"
-            logger.info(f"process_image finished in {processing_time_process:.2f}s. Success: {results['success']}")
+            results['status_message'] = results.get('message', "Pipeline finished.") + f" (Pipeline time: {processing_time_process:.2f}s)"
+            logger.info(f"process_image finished. Success: {results['success']}. {results['status_message']}")
 
         except Exception as e:
-            error_message = f"Error during image processing pipeline execution: {str(e)}"
-            logger.error(error_message, exc_info=True)
-            results['status_message'] = f"Error: {e}"
-            results['success'] = False
-            results['operation_info']['error'] = str(e)
-            import traceback
-            results['operation_info']['traceback'] = traceback.format_exc()
+            msg = f"Error during process_image orchestration: {str(e)}"; logger.error(msg, exc_info=True)
+            results['status_message'] = msg; results['success'] = False
+            results['operation_info']['error'] = str(e); results['operation_info']['traceback'] = traceback.format_exc()
 
-        return results
+        return results # Returnăm dicționarul complet
+
+    def _log_image_context(self, image_context):
+         """Funcție helper pentru logarea contextului."""
+         logger.info("--- Image Context Analysis Results ---")
+         logger.info(f"  Analysis Time: {image_context.get('analysis_time_sec', 'N/A')}s")
+         scene_info = image_context.get('scene_info', {})
+         logger.info(f"  Scene Tag (ML): {scene_info.get('primary_scene_tag_ml', 'N/A')}")
+         detected_objects = scene_info.get('detected_objects', [])
+         if detected_objects: logger.info(f"  Detected Objects ({len(detected_objects)}): {[obj['label'] for obj in detected_objects[:3]]}...")
+         else: logger.info("  Detected Objects: None")
+         lighting_info = image_context.get('lighting_conditions', {})
+         logger.info(f"  Lighting: B={lighting_info.get('brightness_heuristic','?')}, C={lighting_info.get('contrast_heuristic','?')}, T={lighting_info.get('temperature_heuristic','?')}, H={lighting_info.get('highlights_pct','?')}%, S={lighting_info.get('shadows_pct','?')}%.")
+         style_info = image_context.get('style_and_quality', {})
+         logger.info(f"  Style (Heuristic): {style_info.get('visual_style_heuristic', 'N/A')}")
+         depth_info = image_context.get('spatial_info', {})
+         logger.info(f"  Depth Map: {'Available' if depth_info.get('depth_map_available') else 'No'}, Characteristics: {depth_info.get('depth_characteristics', 'N/A')}")
+         logger.info(f"  Full Desc (Heuristic): {image_context.get('full_description_heuristic', 'N/A')}")
+         logger.info("--- End Image Context Analysis ---")
+
+    def _convert_cv2_to_pil(self, image_np):
+         """Convertește NumPy BGR în PIL RGB."""
+         if image_np is None: return None
+         try: return Image.fromarray(cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB))
+         except Exception as e: logger.error(f"CV2 to PIL conversion failed: {e}"); return None
 
 
     def launch(self, **kwargs):
@@ -454,22 +448,17 @@ class FusionFrameUI:
         launch_kwargs = { "server_name": "0.0.0.0", "server_port": 7860, "share": False, "debug": False, **kwargs }
         logger.info(f"Launching Gradio interface with options: {launch_kwargs}")
         if hasattr(self, 'app') and self.app:
-            try:
-                self.app.launch(**launch_kwargs)
+            try: self.app.launch(**launch_kwargs)
             except Exception as e:
                  logger.critical(f"Gradio launch failed: {e}", exc_info=True)
-                 # Încercăm să oferim o sugestie dacă e o problemă comună de port
-                 if "address already in use" in str(e).lower():
-                      logger.info("Port may already be in use. Try stopping other services or using a different port with --port.")
+                 if "address already in use" in str(e).lower(): logger.info("Port may be in use. Try stopping other services or using --port.")
                  sys.exit(1)
-        else:
-            logger.error("Gradio app object ('self.app') not found. Cannot launch.")
+        else: logger.error("Gradio app object not found. Cannot launch.")
 
 
 def main():
     """Funcția principală pentru rularea aplicației."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    # Argumente linie de comandă
     import argparse
     parser = argparse.ArgumentParser(description="FusionFrame 2.0 UI")
     parser.add_argument("--port", type=int, default=7860, help="Port")
@@ -479,29 +468,18 @@ def main():
     parser.add_argument("--low-vram", action="store_true", help="Enable low VRAM mode")
     args = parser.parse_args()
 
-    # Configurare finală logging
     log_level = logging.DEBUG if args.debug else logging.INFO
-    AppConfig.setup_logging(level=log_level)
+    AppConfig.setup_logging(level=log_level) # Setup logging final
 
-    # Setare mod low VRAM
-    if args.low_vram:
-         logger.info("Low VRAM mode requested via command line.")
-         AppConfig.LOW_VRAM_MODE = True
+    if args.low_vram: logger.info("Low VRAM mode requested."); AppConfig.LOW_VRAM_MODE = True
 
     logger.info("Starting FusionFrame UI Application...")
     try:
-        # Asigură directoarele necesare (mutat aici pentru a rula înainte de UI)
-        AppConfig.ensure_dirs()
+        AppConfig.ensure_dirs() # Asigură directoare
         ui = FusionFrameUI()
-        ui.launch(
-            server_name=args.host,
-            server_port=args.port,
-            share=args.share,
-            debug=args.debug
-        )
+        ui.launch(server_name=args.host, server_port=args.port, share=args.share, debug=args.debug)
     except Exception as e:
-        logger.critical(f"Failed to initialize or launch FusionFrameUI: {e}", exc_info=True)
-        sys.exit(1)
+        logger.critical(f"Failed to initialize or launch FusionFrameUI: {e}", exc_info=True); sys.exit(1)
 
 if __name__ == "__main__":
     main()
