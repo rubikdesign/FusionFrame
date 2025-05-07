@@ -20,11 +20,7 @@ logger = logging.getLogger(__name__)
 class RemovalPipeline(BasePipeline):
     """
     Pipeline specializat pentru eliminarea obiectelor sau persoanelor
-    
-    Implementează algoritmi avansați pentru eliminarea completă a
-    obiectelor sau persoanelor din imagine cu reconstrucția fundalului.
     """
-    
     def __init__(self):
         """Inițializează pipeline-ul pentru eliminare"""
         super().__init__()
@@ -38,16 +34,6 @@ class RemovalPipeline(BasePipeline):
                **kwargs) -> Dict[str, Any]:
         """
         Procesează imaginea pentru a elimina un obiect sau o persoană
-        
-        Args:
-            image: Imaginea de procesat
-            prompt: Promptul pentru eliminare
-            strength: Intensitatea eliminării (0.0-1.0)
-            progress_callback: Funcție de callback pentru progres
-            **kwargs: Argumentele adiționale pentru procesare
-            
-        Returns:
-            Dicționar cu rezultatele procesării
         """
         self.progress_callback = progress_callback
         
@@ -68,15 +54,6 @@ class RemovalPipeline(BasePipeline):
                      **kwargs) -> Dict[str, Any]:
         """
         Elimină o persoană din imagine
-        
-        Args:
-            image: Imaginea de procesat
-            operation: Detalii despre operație
-            strength: Intensitatea eliminării (0.0-1.0)
-            **kwargs: Argumentele adiționale pentru procesare
-            
-        Returns:
-            Dicționar cu rezultatele procesării
         """
         # Convertim la format potrivit
         if isinstance(image, np.ndarray):
@@ -138,7 +115,8 @@ class RemovalPipeline(BasePipeline):
         # Procesăm cu modelul
         self._update_progress(0.7, desc="Generare finală...")
         try:
-            result = main_model.process(
+            # Înlocuim process() cu apelul direct al modelului
+            result = main_model(
                 image=pil_image,
                 mask_image=Image.fromarray(mask),
                 prompt=enhanced_prompt,
@@ -149,25 +127,145 @@ class RemovalPipeline(BasePipeline):
                 controlnet_conditioning_scale=params.get('controlnet_conditioning_scale')
             )
             
-            if result['success']:
+            # Adaptăm rezultatul la formatul așteptat
+            output = {
+                'result': result.images[0],
+                'success': True,
+                'message': f"{target} eliminat cu succes"
+            }
+            
+            if output['success']:
                 self._update_progress(1.0, desc="Procesare completă!")
                 return {
-                    'result': result['result'],
+                    'result': output['result'],
                     'mask': Image.fromarray(mask),
                     'operation': operation,
-                    'message': f"{target} eliminat cu succes"
+                    'message': output['message']
                 }
             else:
-                logger.error(f"Error in processing: {result['message']}")
+                logger.error(f"Error in processing: {output.get('message', 'Unknown error')}")
                 return {
                     'result': pil_image,
                     'mask': Image.fromarray(mask),
                     'operation': operation,
-                    'message': result['message']
+                    'message': output.get('message', 'Eroare necunoscută')
                 }
                 
         except Exception as e:
-            logger.error(f"Error in object removal: {str(e)}")
+            logger.error(f"Error in object removal: {str(e)}", exc_info=True)
+            return {
+                'result': pil_image,
+                'mask': Image.fromarray(mask),
+                'operation': operation,
+                'message': f"Eroare: {str(e)}"
+            }
+
+    def remove_object(self,
+                      image: Union[Image.Image, np.ndarray],
+                      operation: Dict[str, Any],
+                      strength: float = 0.75,
+                      **kwargs) -> Dict[str, Any]:
+        """
+        Elimină un obiect generic din imagine
+        """
+        # Convertim la format potrivit
+        if isinstance(image, np.ndarray):
+            image_np = image
+            pil_image = Image.fromarray(image)
+        else:
+            image_np = np.array(image)
+            pil_image = image
+
+        # 1. Analizăm imaginea și contextul
+        self._update_progress(0.1, desc="Analiză imagine...")
+        image_context = self.image_analyzer.analyze_image_context(image_np)
+
+        # 2. Generăm masca pentru obiect
+        self._update_progress(0.2, desc="Generare mască obiect...")
+        target = operation.get('target', 'object')
+        mask_result = self.mask_generator.generate_mask(
+            image=image_np,
+            prompt=target,
+            operation=operation,
+            progress_callback=lambda p, desc: self._update_progress(0.2 + p * 0.3, desc=desc)
+        )
+
+        # Verificăm rezultatul măștii
+        if not mask_result['success']:
+            logger.error("Failed to generate mask")
+            return {
+                'result': pil_image,
+                'mask': None,
+                'operation': operation,
+                'message': "Eroare la generarea măștii"
+            }
+
+        # Obținem masca
+        mask = mask_result['mask']
+
+        # 3. Inpainting folosind modelul principal
+        self._update_progress(0.6, desc="Eliminare obiect...")
+
+        # Obținem modelul principal
+        main_model = self.model_manager.get_model('main')
+        if main_model is None:
+            logger.error("Main model not available")
+            return {
+                'result': pil_image,
+                'mask': Image.fromarray(mask),
+                'operation': operation,
+                'message': "Modelul principal nu este disponibil"
+            }
+
+        # Îmbunătățim prompt-ul cu contextul
+        context_desc = image_context['description']
+        enhanced_prompt = f"scene without {target}, clean area, {context_desc}"
+
+        # Setăm parametrii pentru eliminare
+        params = self._get_generation_params('remove')
+        params['strength'] = max(0.9, strength)  # Asigurăm eliminare completă
+
+        # Procesăm cu modelul
+        self._update_progress(0.7, desc="Generare finală...")
+        try:
+            # Înlocuim process() cu apelul direct al modelului
+            result = main_model(
+                image=pil_image,
+                mask_image=Image.fromarray(mask),
+                prompt=enhanced_prompt,
+                negative_prompt=f"{target}, distortion, artifact, blurry",
+                strength=params['strength'],
+                num_inference_steps=params['num_inference_steps'],
+                guidance_scale=params['guidance_scale'],
+                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale')
+            )
+
+            # Adaptăm rezultatul la formatul așteptat
+            output = {
+                'result': result.images[0],
+                'success': True,
+                'message': f"{target} eliminat cu succes"
+            }
+
+            if output['success']:
+                self._update_progress(1.0, desc="Procesare completă!")
+                return {
+                    'result': output['result'],
+                    'mask': Image.fromarray(mask),
+                    'operation': operation,
+                    'message': output['message']
+                }
+            else:
+                logger.error(f"Error in processing: {output.get('message', 'Unknown error')}")
+                return {
+                    'result': pil_image,
+                    'mask': Image.fromarray(mask),
+                    'operation': operation,
+                    'message': output.get('message', 'Eroare necunoscută')
+                }
+
+        except Exception as e:
+            logger.error(f"Error in object removal: {str(e)}", exc_info=True)
             return {
                 'result': pil_image,
                 'mask': Image.fromarray(mask),
