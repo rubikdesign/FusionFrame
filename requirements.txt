@@ -1,34 +1,28 @@
-# Modificăm torch și torchvision pentru compatibilitate
-torch==2.0.1
-torchvision==0.15.2
+# PyTorch, torchvision, torchaudio vor fi instalate prin install.sh cu versiuni specifice CUDA
+# flash-attn, xformers, diffusers, transformers, ultralytics vor fi instalate/actualizate prin install.sh
 
-# Restul dependențelor
+# Dependențe de bază
 numpy==1.24.3
-opencv-python-headless==4.8.0.74
-pillow==10.0.0
-gradio>=4.44.1
-scikit-image==0.21.0
-requests==2.31.0
-tqdm==4.65.0
+opencv-python-headless==4.8.0.74 # Considerați actualizarea la o versiune mai nouă dacă apar probleme de compatibilitate cu noul PyTorch/NumPy
+pillow==10.0.0 # Considerați actualizarea la Pillow >=10.1.0 dacă apar probleme
+gradio>=4.44.1 # Păstrăm versiunea minimă
+scikit-image==0.21.0 # Considerați actualizarea
+requests==2.31.0 # Considerați actualizarea
+tqdm==4.65.0 # Considerați actualizarea
 psutil==5.9.5
 
-# Diffusers și transformers
-diffusers==0.25.0
-transformers==4.36.0
-accelerate==0.25.0
-safetensors==0.4.0
-huggingface_hub>=0.19.4
+# Accelerate, safetensors, huggingface_hub sunt adesea dependințe ale transformers/diffusers
+# și vor fi actualizate la versiuni compatibile.
+# accelerate==0.25.0 # Se va actualiza ca dependență
+# safetensors==0.4.0 # Se va actualiza ca dependență
+# huggingface_hub>=0.19.4 # Se va actualiza ca dependență
 
-# Modele de segmentare
-mediapipe==0.10.5
+# Modele de segmentare și unelte specializate
+mediapipe==0.10.5 # Considerați actualizarea la cea mai recentă versiune (ex: 0.10.11+)
 segment-anything==1.0
-ultralytics==8.0.20
-
-# Unelte specializate
-rembg==2.0.50
-xformers==0.0.22
-bitsandbytes==0.41.1
-huggingface_hub[hf_xet]
-
-
+# ultralytics va fi actualizat de install.sh
+rembg==2.0.50 # Considerați actualizarea
+# xformers va fi actualizat de install.sh
+bitsandbytes==0.41.1 # Asigurați-vă că această versiune este compatibilă cu PyTorch 2.7+; poate necesita actualizare.
+huggingface_hub[hf_xet] # Păstrează extra-urile pentru hf_xet
 
