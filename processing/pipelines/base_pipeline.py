@@ -3,6 +3,7 @@
 
 """
 Pipeline de bază pentru procesare imagine în FusionFrame 2.0
+(Actualizat pentru a folosi PromptEnhancer contextual)
 """
 
 import logging
@@ -10,286 +11,176 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, Union, Tuple, Callable
 import numpy as np
 from PIL import Image
+import cv2 # Adăugat pentru funcțiile de conversie
 
 from config.app_config import AppConfig
+from config.model_config import ModelConfig # Importăm ModelConfig pentru negative_prompt default
 from core.model_manager import ModelManager
 from processing.analyzer import ImageAnalyzer
 from processing.mask_generator import MaskGenerator
+# NOU: Importăm PromptEnhancer
+from processing.prompt_enhancer import PromptEnhancer
 
 # Setăm logger-ul
 logger = logging.getLogger(__name__)
 
 class BasePipeline(ABC):
     """
-    Clasă abstractă de bază pentru toate pipeline-urile de procesare
-    
-    Toate pipeline-urile specifice vor moșteni această clasă și vor
-    implementa metodele abstracte.
+    Clasă abstractă de bază pentru toate pipeline-urile de procesare.
+    Include acum logica centralizată pentru îmbunătățirea prompturilor.
     """
-    
+
     def __init__(self):
         """Inițializează pipeline-ul de bază"""
         self.config = AppConfig
+        self.model_config = ModelConfig # Stocăm și config model
         self.model_manager = ModelManager()
         self.mask_generator = MaskGenerator()
         self.image_analyzer = ImageAnalyzer()
+        # NOU: Inițializăm PromptEnhancer
+        self.prompt_enhancer = PromptEnhancer()
         self.progress_callback = None
-    
+
     @abstractmethod
-    def process(self, 
+    def process(self,
                image: Union[Image.Image, np.ndarray],
                prompt: str,
                strength: float = 0.75,
-               progress_callback: Callable = None,
+               progress_callback: Optional[Callable] = None, # Optional
+               operation: Optional[Dict[str, Any]] = None,
+               image_context: Optional[Dict[str, Any]] = None,
+               num_inference_steps: Optional[int] = None,
+               guidance_scale: Optional[float] = None,
+               use_controlnet_if_available: bool = True,
+               use_refiner_if_available: Optional[bool] = None,
+               refiner_strength: Optional[float] = None,
+               enhance_details: bool = False, # Adăugat pt semnătură standard
+               fix_faces: bool = False,       # Adăugat pt semnătură standard
+               remove_artifacts: bool = False,# Adăugat pt semnătură standard
                **kwargs) -> Dict[str, Any]:
         """
-        Procesează imaginea folosind pipeline-ul specific
-        
-        Args:
-            image: Imaginea de procesat
-            prompt: Promptul pentru editare
-            strength: Intensitatea editării (0.0-1.0)
-            progress_callback: Funcție de callback pentru progres
-            **kwargs: Argumentele adiționale pentru procesare
-            
+        Metodă abstractă pentru procesarea imaginii.
+        Include acum parametrii comuni pentru a standardiza semnătura.
+
         Returns:
-            Dicționar cu rezultatele procesării
+            Dicționar standardizat: {'result_image': PIL.Image | None,
+                                    'mask_image': PIL.Image | None,
+                                    'operation': Dict,
+                                    'message': str,
+                                    'success': bool}
         """
         pass
-    
+
     def _update_progress(self, progress: float, desc: str = None):
-        """
-        Actualizează callback-ul de progres dacă există
-        
-        Args:
-            progress: Progresul curent (0.0-1.0)
-            desc: Descrierea progresului (opțional)
-        """
+        """Actualizează callback-ul de progres."""
         if self.progress_callback is not None:
-            self.progress_callback(progress, desc=desc)
-    
-    def _enhance_prompt(self, prompt: str, operation: Dict[str, Any] = None) -> str:
-        """
-        Îmbunătățește promptul pentru editare
-        
-        Args:
-            prompt: Promptul original
-            operation: Detalii despre operație
-            
-        Returns:
-            Promptul îmbunătățit
-        """
-        # Prompt enhancers în funcție de tipul operației
-        prompt_enhancers = {
-            'remove': [
-                "highly detailed",
-                "seamless integration",
-                "perfect edges",
-                "no artifacts",
-                "professional retouching"
-            ],
-            'replace': [
-                "photorealistic",
-                "perfect lighting matching",
-                "accurate shadows",
-                "consistent perspective",
-                "high resolution detail"
-            ],
-            'color': [
-                "vibrant colors",
-                "natural gradients",
-                "realistic textures",
-                "accurate lighting",
-                "high quality"
-            ],
-            'background': [
-                "cinematic lighting",
-                "ultra detailed",
-                "professional photography",
-                "8k resolution",
-                "realistic environment"
-            ],
-            'add': [
-                "realistic integration",
-                "perfect placement",
-                "natural appearance",
-                "high quality details",
-                "professional look"
-            ],
-            'general': [
-                "high quality",
-                "detailed",
-                "professional",
-                "sharp focus",
-                "realistic"
-            ]
-        }
-        
-        # Selectăm enhancers în funcție de operație
-        op_type = operation.get('type', 'general') if operation else 'general'
-        enhancers = prompt_enhancers.get(op_type, prompt_enhancers['general'])
-        
-        # Construim promptul îmbunătățit
-        return f"{prompt}, {', '.join(enhancers[:3])}"
-    
+            try:
+                self.progress_callback(progress, desc=desc)
+            except Exception as e:
+                 logger.warning(f"Progress callback failed: {e}")
+                 self.progress_callback = None
+
+    # --- Metode Noi pentru Prompt Enhancement ---
+
+    def _enhance_prompt(self,
+                        prompt: str,
+                        operation: Optional[Dict[str, Any]] = None,
+                        image_context: Optional[Dict[str, Any]] = None) -> str:
+        """Îmbunătățește promptul pozitiv folosind PromptEnhancer."""
+        if not self.prompt_enhancer:
+            logger.warning("PromptEnhancer not initialized. Returning original prompt.")
+            return prompt
+        try:
+            op_type = operation.get('type') if operation else None
+            return self.prompt_enhancer.enhance_prompt(prompt, operation_type=op_type, image_context=image_context)
+        except Exception as e:
+            logger.error(f"Error enhancing prompt: {e}. Returning original.", exc_info=True)
+            return prompt
+
+    def _get_negative_prompt(self,
+                             prompt: str, # Promptul pozitiv original
+                             operation: Optional[Dict[str, Any]] = None,
+                             image_context: Optional[Dict[str, Any]] = None) -> str:
+        """Generează promptul negativ folosind PromptEnhancer."""
+        fallback_negative = self.model_config.GENERATION_PARAMS.get("negative_prompt", "low quality, blurry")
+        if not self.prompt_enhancer:
+            logger.warning("PromptEnhancer not initialized. Returning default negative prompt.")
+            return fallback_negative
+        try:
+            op_type = operation.get('type') if operation else None
+            negative = self.prompt_enhancer.generate_negative_prompt(prompt=prompt, operation_type=op_type, image_context=image_context)
+            return negative if negative else fallback_negative
+        except Exception as e:
+            logger.error(f"Error generating negative prompt: {e}. Returning default.", exc_info=True)
+            return fallback_negative
+
+    # --- Metode Utilitare ---
+
     def _get_generation_params(self, operation_type: str = None) -> Dict[str, Any]:
-        """
-        Obține parametrii optimizați de generare
-        
-        Args:
-            operation_type: Tipul operației (opțional)
-            
-        Returns:
-            Dicționar cu parametrii de generare
-        """
-        # Parametri de bază
+        """Obține parametrii de generare default specifici operației."""
         base_params = {
-            'num_inference_steps': 50,
-            'guidance_scale': 7.5,
+            'num_inference_steps': self.model_config.GENERATION_PARAMS['default_steps'],
+            'guidance_scale': self.model_config.GENERATION_PARAMS['guidance_scale'],
             'strength': 0.75,
-            'controlnet_conditioning_scale': 0.8
+            'controlnet_conditioning_scale': self.model_config.CONTROLNET_CONFIG.get('conditioning_scale', 0.7)
         }
-        
-        # Ajustăm parametrii bazați pe tipul operației
-        if operation_type == 'remove':
-            base_params.update({
-                'num_inference_steps': 60,
-                'guidance_scale': 9.0,
-                'strength': 0.85,
-                'controlnet_conditioning_scale': 0.6
-            })
-        elif operation_type == 'replace':
-            base_params.update({
-                'num_inference_steps': 70,
-                'guidance_scale': 10.0,
-                'strength': 0.9,
-                'controlnet_conditioning_scale': 0.9
-            })
-        elif operation_type == 'background':
-            base_params.update({
-                'num_inference_steps': 65,
-                'guidance_scale': 8.5,
-                'strength': 0.8,
-                'controlnet_conditioning_scale': 0.7
-            })
-        elif operation_type == 'color':
-            base_params.update({
-                'num_inference_steps': 45,
-                'guidance_scale': 7.0,
-                'strength': 0.7,
-                'controlnet_conditioning_scale': 0.5
-            })
-        
+        if operation_type == 'remove': base_params.update({'strength': 0.85, 'num_inference_steps': 60})
+        elif operation_type == 'replace': base_params.update({'strength': 0.90, 'num_inference_steps': 70})
+        elif operation_type == 'color': base_params.update({'strength': 0.65, 'num_inference_steps': 45})
+        elif operation_type == 'background': base_params.update({'strength': 0.80, 'num_inference_steps': 65})
+        logger.debug(f"Base generation params for op '{operation_type}': {base_params}")
         return base_params
-    
-    def _prepare_control_image(self, 
-                              image: Union[Image.Image, np.ndarray],
-                              mask: Union[Image.Image, np.ndarray],
-                              control_mode: str = "canny") -> Optional[Image.Image]:
-        """
-        Pregătește imaginea de control pentru ControlNet
-        
-        Args:
-            image: Imaginea originală
-            mask: Masca pentru editare
-            control_mode: Modul de control (canny, depth, normal)
-            
-        Returns:
-            Imaginea de control pregătită sau None în caz de eroare
-        """
-        try:
-            # Obținem handler-ul ControlNet
-            controlnet_handler = self.model_manager.get_model('controlnet')
-            if controlnet_handler is None:
-                # Fallback la procesare simplă
-                return self._create_canny_control(image, mask)
-            
-            # Procesăm cu handler-ul ControlNet
-            result = controlnet_handler.process(image, control_mode)
-            if result['success'] and result['control_image'] is not None:
-                return result['control_image']
-            else:
-                # Fallback la procesare simplă
-                return self._create_canny_control(image, mask)
-                
-        except Exception as e:
-            logger.error(f"Error preparing control image: {str(e)}")
-            # Fallback la procesare simplă
-            return self._create_canny_control(image, mask)
-    
-    def _create_canny_control(self, 
-                            image: Union[Image.Image, np.ndarray],
-                            mask: Union[Image.Image, np.ndarray]) -> Optional[Image.Image]:
-        """
-        Creează o imagine de control Canny simplă
-        
-        Args:
-            image: Imaginea originală
-            mask: Masca pentru editare
-            
-        Returns:
-            Imaginea de control Canny sau None în caz de eroare
-        """
-        try:
-            # Convertim la numpy dacă este PIL
-            if isinstance(image, Image.Image):
-                image_np = np.array(image)
-            else:
-                image_np = image
-            
-            # Convertim masca la numpy dacă este PIL
-            if isinstance(mask, Image.Image):
-                mask_np = np.array(mask)
-            else:
-                mask_np = mask
-            
-            # Ne asigurăm că masca este binară
-            if mask_np.max() > 1 and mask_np.dtype != np.bool_:
-                mask_np = mask_np > 127
-            
-            # Convertim la tonuri de gri
-            if len(image_np.shape) == 3:
-                gray = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = image_np
-            
-            # Praguri adaptive bazate pe conținutul imaginii
-            median_value = np.median(gray)
-            lower_threshold = max(0, int(median_value * 0.7))
-            upper_threshold = min(255, int(median_value * 1.3))
-            
-            # Aplicăm detecția de margini Canny
-            edges = cv2.Canny(gray, lower_threshold, upper_threshold)
-            
-            # Aplicăm masca la margini
-            masked_edges = cv2.bitwise_and(edges, edges, mask=mask_np.astype(np.uint8))
-            
-            # Blur ușor pentru a reduce zgomotul
-            masked_edges = cv2.GaussianBlur(masked_edges, (3, 3), 0)
-            
-            # Convertim la imagine PIL
-            return Image.fromarray(masked_edges)
-            
-        except Exception as e:
-            logger.error(f"Error creating Canny control image: {str(e)}")
-            return None
-    
-    def _select_model(self, operation_type: str = None) -> str:
-        """
-        Selectează modelul potrivit pentru operație
-        
-        Args:
-            operation_type: Tipul operației
-            
-        Returns:
-            Numele modelului selectat
-        """
-        # Implicit folosim modelul principal (HiDream)
-        model_name = 'main'
-        
-        # Pentru operații speciale, putem decide să folosim alt model
-        if operation_type == 'color' and operation_type == 'background':
-            # FLUX poate fi mai potrivit pentru unele operații
-            model_name = 'flux'
-        
-        return model_name
+
+    def _convert_to_pil(self, image: Union[Image.Image, np.ndarray], mode: str = "RGB") -> Image.Image:
+        """Converteste inputul in PIL Image (RGB sau alt mod specificat)."""
+        if isinstance(image, Image.Image):
+            return image.convert(mode) if image.mode != mode else image
+        elif isinstance(image, np.ndarray):
+            if image.ndim == 2: # Grayscale
+                 if mode == "L": return Image.fromarray(image)
+                 elif mode == "RGB": return Image.fromarray(cv2.cvtColor(image, cv2.COLOR_GRAY2RGB))
+                 else: raise ValueError(f"Cannot convert grayscale NumPy to PIL mode {mode}")
+            elif image.shape[2] == 4: # RGBA
+                 img_rgba = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA) # Asigurăm RGBA order
+                 pil_img = Image.fromarray(img_rgba, 'RGBA')
+                 return pil_img.convert(mode) if mode != "RGBA" else pil_img
+            elif image.shape[2] == 3: # Presupunem BGR
+                 img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                 pil_img = Image.fromarray(img_rgb, 'RGB')
+                 return pil_img.convert(mode) if mode != "RGB" else pil_img
+            else: raise ValueError(f"Unsupported NumPy shape for PIL conversion: {image.shape}")
+        else: raise TypeError(f"Unsupported type for PIL conversion: {type(image)}")
+
+    def _convert_to_cv2(self, image: Union[Image.Image, np.ndarray]) -> np.ndarray:
+        """Converteste inputul in NumPy array BGR."""
+        if isinstance(image, np.ndarray):
+            if image.ndim == 2: return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+            elif image.shape[2] == 4: return cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+            elif image.shape[2] == 3: return image # Asumăm BGR
+            else: raise ValueError(f"Unsupported NumPy shape for CV2 conversion: {image.shape}")
+        elif isinstance(image, Image.Image):
+            mode = image.mode
+            if mode == 'L': return cv2.cvtColor(np.array(image), cv2.COLOR_GRAY2BGR)
+            elif mode == 'RGBA': return cv2.cvtColor(np.array(image.convert('RGBA')), cv2.COLOR_RGBA2BGR) # Convert to RGBA first
+            elif mode == 'RGB': return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            else: # Încercăm conversia la RGB ca fallback
+                 logger.warning(f"Converting PIL image from mode {mode} to RGB before CV2 BGR.")
+                 return cv2.cvtColor(np.array(image.convert('RGB')), cv2.COLOR_RGB2BGR)
+        else: raise TypeError(f"Unsupported type for CV2 conversion: {type(image)}")
+
+    def _ensure_pil_mask(self, mask: Optional[Union[Image.Image, np.ndarray]]) -> Optional[Image.Image]:
+        """Asigură că masca este PIL Image în mod 'L'."""
+        if mask is None: return None
+        if isinstance(mask, Image.Image):
+             return mask.convert("L") if mask.mode != "L" else mask
+        elif isinstance(mask, np.ndarray):
+             if mask.ndim == 3 and mask.shape[2] == 1: mask = mask.squeeze(axis=2)
+             if mask.ndim != 2: raise ValueError("Mask NumPy array must be 2D for PIL conversion.")
+             # Normalizăm la 0-255 dacă e necesar
+             if mask.dtype != np.uint8:
+                  if np.max(mask) <= 1.0 and (mask.dtype == np.float32 or mask.dtype == np.float64):
+                       mask = (mask * 255).astype(np.uint8)
+                  else:
+                       mask = np.clip(mask, 0, 255).astype(np.uint8)
+             return Image.fromarray(mask, 'L')
+        else: raise TypeError(f"Unsupported mask type: {type(mask)}")
