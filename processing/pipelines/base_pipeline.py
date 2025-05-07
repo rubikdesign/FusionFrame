@@ -41,8 +41,6 @@ class BasePipeline(ABC):
                prompt: str,
                strength: float = 0.75,
                progress_callback: Callable = None,
-               use_refiner: bool = None,
-               refiner_strength: float = None,
                **kwargs) -> Dict[str, Any]:
         """
         Procesează imaginea folosind pipeline-ul specific
@@ -52,8 +50,6 @@ class BasePipeline(ABC):
             prompt: Promptul pentru editare
             strength: Intensitatea editării (0.0-1.0)
             progress_callback: Funcție de callback pentru progres
-            use_refiner: Dacă să folosească refiner
-            refiner_strength: Intensitatea refiner-ului
             **kwargs: Argumentele adiționale pentru procesare
             
         Returns:

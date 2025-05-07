@@ -17,6 +17,12 @@ class AppConfig:
     # Dispozitiv și tipuri de date
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     DTYPE = torch.float16 if torch.cuda.is_available() else torch.float32
+
+
+    MEDIAPIPE_SELFIE_MODEL_SELECTION = 1 # 0 pentru landscape, 1 pentru general
+    MEDIAPIPE_FACE_MODEL_SELECTION = 0 # 0 pentru short-range, 1 pentru full-range
+    MEDIAPIPE_FACE_MIN_CONFIDENCE = 0.5
+    REMBG_MODEL_NAME = "u2net" # Alte opțiuni: "u2net_human_seg", "isnet-general-use", etc.
     
     # Verificare CUDA și setare optimizări
     CUDA_AVAILABLE = torch.cuda.is_available()

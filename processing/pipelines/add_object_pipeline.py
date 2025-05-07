@@ -101,33 +101,58 @@ class AddObjectPipeline(BasePipeline):
 
         self._update_progress(0.7, desc="Aplicare ochelari...")
         try:
-            result = main_model.process(
-                image=pil_image,
-                mask_image=Image.fromarray(face_mask),
-                prompt=prompt_text,
-                negative_prompt="unrealistic, deformed, distorted, blurry, bad quality",
-                strength=params['strength'],
-                num_inference_steps=params['num_inference_steps'],
-                guidance_scale=params['guidance_scale'],
-                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale'),
-                use_refiner=use_refiner,
-                refiner_strength=refiner_strength
-            )
-            if result['success']:
+            # Înlocuim process() cu __call__() și adăugăm parametrii pentru refiner
+            generation_params = {
+                'image': pil_image,
+                'mask_image': Image.fromarray(face_mask),
+                'prompt': prompt_text,
+                'negative_prompt': "unrealistic, deformed, distorted, blurry, bad quality",
+                'strength': params['strength'],
+                'num_inference_steps': params['num_inference_steps'],
+                'guidance_scale': params['guidance_scale'],
+                'controlnet_conditioning_scale': params.get('controlnet_conditioning_scale'),
+            }
+            
+            # Adăugăm parametrii refiner doar dacă sunt specificați
+            if use_refiner is not None:
+                generation_params['use_refiner'] = use_refiner
+            if refiner_strength is not None:
+                generation_params['refiner_strength'] = refiner_strength
+                
+            result = main_model(**generation_params)
+            
+            # Adaptăm rezultatul la formatul așteptat
+            output = {
+                'result': result.images[0],
+                'success': True,
+                'message': "Ochelari adăugați cu succes"
+            }
+            
+            if output['success']:
                 try:
                     self._update_progress(0.9, desc="Îmbunătățire față...")
                     gpen = self.model_manager.get_specialized_model('gpen')
                     if gpen:
-                        er = gpen.process(np.array(result['result']))
+                        er = gpen.process(np.array(output['result']))
                         if er['success']:
-                            result['result'] = er['result']
-                except Exception:
-                    pass
+                            output['result'] = er['result']
+                except Exception as e:
+                    logger.warning(f"Error in face enhancement: {e}")
                 self._update_progress(1.0, desc="Procesare completă!")
-            return {'result': result['result'], 'mask': Image.fromarray(face_mask), 'operation': operation, 'message': result.get('message', '')}
+            return {
+                'result': output['result'], 
+                'mask': Image.fromarray(face_mask), 
+                'operation': operation, 
+                'message': output.get('message', '')
+            }
         except Exception as e:
-            logger.error(f"Error in adding glasses: {e}")
-            return {'result': pil_image, 'mask': Image.fromarray(face_mask), 'operation': operation, 'message': f"Eroare: {e}"}
+            logger.error(f"Error in adding glasses: {e}", exc_info=True)
+            return {
+                'result': pil_image, 
+                'mask': Image.fromarray(face_mask), 
+                'operation': operation, 
+                'message': f"Eroare: {e}"
+            }
 
     def add_generic_object(self,
                            image: Union[Image.Image, np.ndarray],
@@ -163,7 +188,12 @@ class AddObjectPipeline(BasePipeline):
         self._update_progress(0.5, desc=f"Generare {obj}...")
         main_model = self.model_manager.get_model('main')
         if not main_model:
-            return {'result': pil_image, 'mask': Image.fromarray(mask), 'operation': operation, 'message': "Modelul principal nu este disponibil"}
+            return {
+                'result': pil_image, 
+                'mask': Image.fromarray(mask), 
+                'operation': operation, 
+                'message': "Modelul principal nu este disponibil"
+            }
 
         scene = image_context.get('scene_type', 'scene')
         style = image_context.get('style', 'natural')
@@ -172,24 +202,49 @@ class AddObjectPipeline(BasePipeline):
         params = self._get_generation_params('add')
         self._update_progress(0.7, desc=f"Aplicare {obj}...")
         try:
-            result = main_model.process(
-                image=pil_image,
-                mask_image=Image.fromarray(mask),
-                prompt=prompt_text,
-                negative_prompt="unrealistic, deformed, distorted, blurry, bad quality",
-                strength=strength,
-                num_inference_steps=params['num_inference_steps'],
-                guidance_scale=params['guidance_scale'],
-                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale'),
-                use_refiner=use_refiner,
-                refiner_strength=refiner_strength
-            )
-            if result['success']:
+            # Înlocuim process() cu __call__() și adăugăm parametrii pentru refiner
+            generation_params = {
+                'image': pil_image,
+                'mask_image': Image.fromarray(mask),
+                'prompt': prompt_text,
+                'negative_prompt': "unrealistic, deformed, distorted, blurry, bad quality",
+                'strength': strength,
+                'num_inference_steps': params['num_inference_steps'],
+                'guidance_scale': params['guidance_scale'],
+                'controlnet_conditioning_scale': params.get('controlnet_conditioning_scale'),
+            }
+            
+            # Adăugăm parametrii refiner doar dacă sunt specificați
+            if use_refiner is not None:
+                generation_params['use_refiner'] = use_refiner
+            if refiner_strength is not None:
+                generation_params['refiner_strength'] = refiner_strength
+                
+            result = main_model(**generation_params)
+            
+            # Adaptăm rezultatul la formatul așteptat
+            output = {
+                'result': result.images[0],
+                'success': True,
+                'message': f"{obj.capitalize()} adăugat cu succes"
+            }
+            
+            if output['success']:
                 self._update_progress(1.0, desc="Procesare completă!")
-            return {'result': result['result'], 'mask': Image.fromarray(mask), 'operation': operation, 'message': result.get('message', '')}
+            return {
+                'result': output['result'], 
+                'mask': Image.fromarray(mask), 
+                'operation': operation, 
+                'message': output.get('message', '')
+            }
         except Exception as e:
-            logger.error(f"Error in adding object: {e}")
-            return {'result': pil_image, 'mask': Image.fromarray(mask), 'operation': operation, 'message': f"Eroare: {e}"}
+            logger.error(f"Error in adding object: {e}", exc_info=True)
+            return {
+                'result': pil_image, 
+                'mask': Image.fromarray(mask), 
+                'operation': operation, 
+                'message': f"Eroare: {e}"
+            }
 
     def remove_object(self,
                       image: Union[Image.Image, np.ndarray],
@@ -216,13 +271,23 @@ class AddObjectPipeline(BasePipeline):
             progress_callback=lambda p, desc: self._update_progress(0.2 + p*0.3, desc=desc)
         )
         if not mask_res['success']:
-            return {'result': pil_image, 'mask': None, 'operation': operation, 'message': "Eroare la generarea măștii"}
+            return {
+                'result': pil_image, 
+                'mask': None, 
+                'operation': operation, 
+                'message': "Eroare la generarea măștii"
+            }
         mask = mask_res['mask']
 
         self._update_progress(0.6, desc="Eliminare inițială...")
         main_model = self.model_manager.get_model('main')
         if not main_model:
-            return {'result': pil_image, 'mask': Image.fromarray(mask), 'operation': operation, 'message': "Modelul principal nu este disponibil"}
+            return {
+                'result': pil_image, 
+                'mask': Image.fromarray(mask), 
+                'operation': operation, 
+                'message': "Modelul principal nu este disponibil"
+            }
 
         desc = image_context.get('description', '')
         prompt_text = f"empty scene without any person, clean background, {desc}"
@@ -231,21 +296,46 @@ class AddObjectPipeline(BasePipeline):
 
         self._update_progress(0.7, desc="Generare finală...")
         try:
-            result = main_model.process(
-                image=pil_image,
-                mask_image=Image.fromarray(mask),
-                prompt=prompt_text,
-                negative_prompt="person, human, face, body, distortion, artifact, blurry",
-                strength=params['strength'],
-                num_inference_steps=params['num_inference_steps'],
-                guidance_scale=params['guidance_scale'],
-                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale'),
-                use_refiner=use_refiner,
-                refiner_strength=refiner_strength
-            )
-            if result['success']:
+            # Înlocuim process() cu __call__() și adăugăm parametrii pentru refiner
+            generation_params = {
+                'image': pil_image,
+                'mask_image': Image.fromarray(mask),
+                'prompt': prompt_text,
+                'negative_prompt': "person, human, face, body, distortion, artifact, blurry",
+                'strength': params['strength'],
+                'num_inference_steps': params['num_inference_steps'],
+                'guidance_scale': params['guidance_scale'],
+                'controlnet_conditioning_scale': params.get('controlnet_conditioning_scale'),
+            }
+            
+            # Adăugăm parametrii refiner doar dacă sunt specificați
+            if use_refiner is not None:
+                generation_params['use_refiner'] = use_refiner
+            if refiner_strength is not None:
+                generation_params['refiner_strength'] = refiner_strength
+                
+            result = main_model(**generation_params)
+            
+            # Adaptăm rezultatul la formatul așteptat
+            output = {
+                'result': result.images[0],
+                'success': True,
+                'message': "Obiect eliminat cu succes"
+            }
+            
+            if output['success']:
                 self._update_progress(1.0, desc="Procesare completă!")
-            return {'result': result['result'], 'mask': Image.fromarray(mask), 'operation': operation, 'message': result.get('message', '')}
+            return {
+                'result': output['result'], 
+                'mask': Image.fromarray(mask), 
+                'operation': operation, 
+                'message': output.get('message', '')
+            }
         except Exception as e:
-            logger.error(f"Error in person removal: {e}")
-            return {'result': pil_image, 'mask': Image.fromarray(mask), 'operation': operation, 'message': f"Eroare: {e}"}
+            logger.error(f"Error in person removal: {e}", exc_info=True)
+            return {
+                'result': pil_image, 
+                'mask': Image.fromarray(mask), 
+                'operation': operation, 
+                'message': f"Eroare: {e}"
+            }

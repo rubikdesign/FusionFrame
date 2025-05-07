@@ -3,6 +3,10 @@
 
 echo "===== Configurare mediu pentru FusionFrame 2.0 ====="
 echo "Creez mediul virtual..."
+pip install flash-attn==2.4.2 --no-build-isolation
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+pip uninstall xformers -y
+pip install -U xformers
 
 # Crearea mediului virtual
 python -m venv fusionframe_env
