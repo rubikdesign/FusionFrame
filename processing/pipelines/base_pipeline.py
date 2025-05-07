@@ -10,286 +10,153 @@ from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, Union, Tuple, Callable
 import numpy as np
 from PIL import Image
+import sys 
+import cv2 # Import cv2 pentru _create_canny_control
 
-from config.app_config import AppConfig
-from core.model_manager import ModelManager
-from processing.analyzer import ImageAnalyzer
-from processing.mask_generator import MaskGenerator
+# --- Importuri Critice pentru Configurare ---
+try:
+    from config.app_config import AppConfig
+    from config.model_config import ModelConfig # <-- IMPORTUL ESENȚIAL PENTRU ModelConfig
+except ImportError as e_cfg:
+    logging.basicConfig(level=logging.CRITICAL)
+    logging.critical(f"CRITICAL ERROR: Failed to import AppConfig or ModelConfig in base_pipeline.py: {e_cfg}", exc_info=True)
+    sys.exit(f"Critical configuration import error: {e_cfg}")
 
-# Setăm logger-ul
+# --- Alte Importuri Core ---
+try:
+    from core.model_manager import ModelManager
+    from processing.analyzer import ImageAnalyzer
+    from processing.mask_generator import MaskGenerator 
+except ImportError as e_core:
+     # Folosim un logger de bază dacă cel configurat nu e disponibil încă
+     logging.basicConfig(level=logging.ERROR)
+     logger_fallback = logging.getLogger(__name__) 
+     logger_fallback.error(f"ERROR: Failed to import core modules (ModelManager, ImageAnalyzer, MaskGenerator) in base_pipeline.py: {e_core}", exc_info=True)
+     # Setăm la None pentru a putea verifica existența lor în __init__
+     ModelManager = None
+     ImageAnalyzer = None
+     MaskGenerator = None
+
+
+# Setăm logger-ul (ar trebui să fie deja configurat de AppConfig.setup_logging() la rularea aplicației)
 logger = logging.getLogger(__name__)
+if not logger.hasHandlers() or not any(isinstance(h, logging.StreamHandler) for h in logger.handlers):
+    _ch = logging.StreamHandler(); _f = logging.Formatter("%(asctime)s-%(name)s-%(levelname)s-%(message)s"); _ch.setFormatter(_f)
+    logger.addHandler(_ch); 
+    if logger.level == logging.NOTSET: logger.setLevel(logging.INFO)
+
 
 class BasePipeline(ABC):
     """
-    Clasă abstractă de bază pentru toate pipeline-urile de procesare
-    
-    Toate pipeline-urile specifice vor moșteni această clasă și vor
-    implementa metodele abstracte.
+    Clasă abstractă de bază pentru toate pipeline-urile de procesare.
     """
     
     def __init__(self):
-        """Inițializează pipeline-ul de bază"""
-        self.config = AppConfig
+        """Inițializează pipeline-ul de bază."""
+        self.config_class = AppConfig 
+        
+        if ModelManager is None: # Verificăm dacă importul a reușit
+            raise RuntimeError("ModelManager could not be imported. BasePipeline cannot initialize.")
         self.model_manager = ModelManager()
-        self.mask_generator = MaskGenerator()
-        self.image_analyzer = ImageAnalyzer()
-        self.progress_callback = None
+        
+        try:
+            if MaskGenerator is None: raise RuntimeError("MaskGenerator could not be imported.")
+            self.mask_generator = MaskGenerator()
+            if ImageAnalyzer is None: raise RuntimeError("ImageAnalyzer could not be imported.")
+            self.image_analyzer = ImageAnalyzer()
+        except Exception as e_init_comp:
+            logger.critical(f"Error initializing components (MaskGenerator, ImageAnalyzer) in BasePipeline: {e_init_comp}", exc_info=True)
+            raise e_init_comp
+
+        self.progress_callback: Optional[Callable[[float, Optional[str]], None]] = None 
     
     @abstractmethod
     def process(self, 
                image: Union[Image.Image, np.ndarray],
                prompt: str,
                strength: float = 0.75,
-               progress_callback: Callable = None,
+               progress_callback: Optional[Callable[[float, Optional[str]], None]] = None, 
                **kwargs) -> Dict[str, Any]:
-        """
-        Procesează imaginea folosind pipeline-ul specific
-        
-        Args:
-            image: Imaginea de procesat
-            prompt: Promptul pentru editare
-            strength: Intensitatea editării (0.0-1.0)
-            progress_callback: Funcție de callback pentru progres
-            **kwargs: Argumentele adiționale pentru procesare
-            
-        Returns:
-            Dicționar cu rezultatele procesării
-        """
-        pass
+        """Metodă abstractă pentru procesarea imaginii."""
+        pass 
     
-    def _update_progress(self, progress: float, desc: str = None):
-        """
-        Actualizează callback-ul de progres dacă există
-        
-        Args:
-            progress: Progresul curent (0.0-1.0)
-            desc: Descrierea progresului (opțional)
-        """
+    def _update_progress(self, progress: float, desc: Optional[str] = None): 
+        """Actualizează callback-ul de progres."""
         if self.progress_callback is not None:
-            self.progress_callback(progress, desc=desc)
+            try:
+                self.progress_callback(progress, desc) 
+            except TypeError as te:
+                 logger.error(f"TypeError calling progress callback: {te}. Args: progress={progress}, desc='{desc}'", exc_info=False)
+            except Exception as e_cb:
+                 logger.error(f"Error executing progress callback: {e_cb}", exc_info=True)
     
-    def _enhance_prompt(self, prompt: str, operation: Dict[str, Any] = None) -> str:
-        """
-        Îmbunătățește promptul pentru editare
-        
-        Args:
-            prompt: Promptul original
-            operation: Detalii despre operație
-            
-        Returns:
-            Promptul îmbunătățit
-        """
-        # Prompt enhancers în funcție de tipul operației
+    def _enhance_prompt(self, prompt: str, operation: Optional[Dict[str, Any]] = None) -> str:
+        """Îmbunătățește promptul pentru editare."""
         prompt_enhancers = {
-            'remove': [
-                "highly detailed",
-                "seamless integration",
-                "perfect edges",
-                "no artifacts",
-                "professional retouching"
-            ],
-            'replace': [
-                "photorealistic",
-                "perfect lighting matching",
-                "accurate shadows",
-                "consistent perspective",
-                "high resolution detail"
-            ],
-            'color': [
-                "vibrant colors",
-                "natural gradients",
-                "realistic textures",
-                "accurate lighting",
-                "high quality"
-            ],
-            'background': [
-                "cinematic lighting",
-                "ultra detailed",
-                "professional photography",
-                "8k resolution",
-                "realistic environment"
-            ],
-            'add': [
-                "realistic integration",
-                "perfect placement",
-                "natural appearance",
-                "high quality details",
-                "professional look"
-            ],
-            'general': [
-                "high quality",
-                "detailed",
-                "professional",
-                "sharp focus",
-                "realistic"
-            ]
+            'remove': ["highly detailed", "seamless integration", "perfect edges", "no artifacts", "professional retouching"],
+            'replace': ["photorealistic", "perfect lighting matching", "accurate shadows", "consistent perspective", "high resolution detail"],
+            'color': ["vibrant colors", "natural gradients", "realistic textures", "accurate lighting", "high quality"],
+            'background': ["cinematic lighting", "ultra detailed", "professional photography", "8k resolution", "realistic environment"],
+            'add': ["realistic integration", "perfect placement", "natural appearance", "high quality details", "professional look"],
+            'general': ["high quality", "detailed", "professional", "sharp focus", "realistic"]
         }
-        
-        # Selectăm enhancers în funcție de operație
         op_type = operation.get('type', 'general') if operation else 'general'
         enhancers = prompt_enhancers.get(op_type, prompt_enhancers['general'])
-        
-        # Construim promptul îmbunătățit
-        return f"{prompt}, {', '.join(enhancers[:3])}"
-    
-    def _get_generation_params(self, operation_type: str = None) -> Dict[str, Any]:
-        """
-        Obține parametrii optimizați de generare
-        
-        Args:
-            operation_type: Tipul operației (opțional)
-            
-        Returns:
-            Dicționar cu parametrii de generare
-        """
-        # Parametri de bază
+        num_enhancers_to_add = 3 
+        if len(prompt) < 150: 
+             return f"{prompt}, {', '.join(enhancers[:num_enhancers_to_add])}"
+        return prompt
+
+    def _get_generation_params(self, operation_type: Optional[str] = None) -> Dict[str, Any]:
+        """Obține parametrii optimizați de generare."""
         base_params = {
-            'num_inference_steps': 50,
-            'guidance_scale': 7.5,
-            'strength': 0.75,
-            'controlnet_conditioning_scale': 0.8
+            'num_inference_steps': self.config_class.DEFAULT_STEPS,
+            'guidance_scale': self.config_class.DEFAULT_GUIDANCE_SCALE,
+            'strength': 0.75, 
+            # ModelConfig este acum importat și disponibil în scope-ul modulului
+            'controlnet_conditioning_scale': getattr(ModelConfig, 'CONTROLNET_CONFIG', {}).get('conditioning_scale', 0.8) 
         }
         
-        # Ajustăm parametrii bazați pe tipul operației
         if operation_type == 'remove':
-            base_params.update({
-                'num_inference_steps': 60,
-                'guidance_scale': 9.0,
-                'strength': 0.85,
-                'controlnet_conditioning_scale': 0.6
-            })
+            base_params.update({'num_inference_steps': 60, 'guidance_scale': 9.0, 'strength': 0.9, 'controlnet_conditioning_scale': 0.6})
         elif operation_type == 'replace':
-            base_params.update({
-                'num_inference_steps': 70,
-                'guidance_scale': 10.0,
-                'strength': 0.9,
-                'controlnet_conditioning_scale': 0.9
-            })
+            base_params.update({'num_inference_steps': 70, 'guidance_scale': 10.0, 'strength': 0.9, 'controlnet_conditioning_scale': 0.9})
         elif operation_type == 'background':
-            base_params.update({
-                'num_inference_steps': 65,
-                'guidance_scale': 8.5,
-                'strength': 0.8,
-                'controlnet_conditioning_scale': 0.7
-            })
+            base_params.update({'num_inference_steps': 65, 'guidance_scale': 8.5, 'strength': 0.85, 'controlnet_conditioning_scale': 0.7})
         elif operation_type == 'color':
-            base_params.update({
-                'num_inference_steps': 45,
-                'guidance_scale': 7.0,
-                'strength': 0.7,
-                'controlnet_conditioning_scale': 0.5
-            })
+            base_params.update({'num_inference_steps': 45, 'guidance_scale': 7.0, 'strength': 0.7, 'controlnet_conditioning_scale': 0.5})
         
         return base_params
     
     def _prepare_control_image(self, 
                               image: Union[Image.Image, np.ndarray],
-                              mask: Union[Image.Image, np.ndarray],
                               control_mode: str = "canny") -> Optional[Image.Image]:
-        """
-        Pregătește imaginea de control pentru ControlNet
-        
-        Args:
-            image: Imaginea originală
-            mask: Masca pentru editare
-            control_mode: Modul de control (canny, depth, normal)
-            
-        Returns:
-            Imaginea de control pregătită sau None în caz de eroare
-        """
-        try:
-            # Obținem handler-ul ControlNet
-            controlnet_handler = self.model_manager.get_model('controlnet')
-            if controlnet_handler is None:
-                # Fallback la procesare simplă
-                return self._create_canny_control(image, mask)
-            
-            # Procesăm cu handler-ul ControlNet
-            result = controlnet_handler.process(image, control_mode)
-            if result['success'] and result['control_image'] is not None:
-                return result['control_image']
-            else:
-                # Fallback la procesare simplă
-                return self._create_canny_control(image, mask)
-                
-        except Exception as e:
-            logger.error(f"Error preparing control image: {str(e)}")
-            # Fallback la procesare simplă
-            return self._create_canny_control(image, mask)
-    
-    def _create_canny_control(self, 
-                            image: Union[Image.Image, np.ndarray],
-                            mask: Union[Image.Image, np.ndarray]) -> Optional[Image.Image]:
-        """
-        Creează o imagine de control Canny simplă
-        
-        Args:
-            image: Imaginea originală
-            mask: Masca pentru editare
-            
-        Returns:
-            Imaginea de control Canny sau None în caz de eroare
-        """
-        try:
-            # Convertim la numpy dacă este PIL
-            if isinstance(image, Image.Image):
-                image_np = np.array(image)
-            else:
-                image_np = image
-            
-            # Convertim masca la numpy dacă este PIL
-            if isinstance(mask, Image.Image):
-                mask_np = np.array(mask)
-            else:
-                mask_np = mask
-            
-            # Ne asigurăm că masca este binară
-            if mask_np.max() > 1 and mask_np.dtype != np.bool_:
-                mask_np = mask_np > 127
-            
-            # Convertim la tonuri de gri
-            if len(image_np.shape) == 3:
-                gray = cv2.cvtColor(image_np, cv2.COLOR_BGR2GRAY)
-            else:
-                gray = image_np
-            
-            # Praguri adaptive bazate pe conținutul imaginii
-            median_value = np.median(gray)
-            lower_threshold = max(0, int(median_value * 0.7))
-            upper_threshold = min(255, int(median_value * 1.3))
-            
-            # Aplicăm detecția de margini Canny
-            edges = cv2.Canny(gray, lower_threshold, upper_threshold)
-            
-            # Aplicăm masca la margini
-            masked_edges = cv2.bitwise_and(edges, edges, mask=mask_np.astype(np.uint8))
-            
-            # Blur ușor pentru a reduce zgomotul
-            masked_edges = cv2.GaussianBlur(masked_edges, (3, 3), 0)
-            
-            # Convertim la imagine PIL
-            return Image.fromarray(masked_edges)
-            
-        except Exception as e:
-            logger.error(f"Error creating Canny control image: {str(e)}")
+        logger.debug(f"Preparing control image using mode: {control_mode}")
+        if control_mode.lower() == "canny":
+            return self._create_canny_control(image)
+        else:
+            logger.warning(f"Control mode '{control_mode}' not implemented in base _prepare_control_image.")
             return None
     
-    def _select_model(self, operation_type: str = None) -> str:
-        """
-        Selectează modelul potrivit pentru operație
-        
-        Args:
-            operation_type: Tipul operației
-            
-        Returns:
-            Numele modelului selectat
-        """
-        # Implicit folosim modelul principal (HiDream)
-        model_name = 'main'
-        
-        # Pentru operații speciale, putem decide să folosim alt model
-        if operation_type == 'color' and operation_type == 'background':
-            # FLUX poate fi mai potrivit pentru unele operații
-            model_name = 'flux'
-        
-        return model_name
+    def _create_canny_control(self, 
+                            image: Union[Image.Image, np.ndarray]
+                            ) -> Optional[Image.Image]:
+        try:
+            if isinstance(image, Image.Image): image_np = np.array(image.convert("RGB"))
+            else: image_np = image.copy() 
+
+            if image_np.ndim == 3 and image_np.shape[2] == 3: 
+                 if isinstance(image, Image.Image): image_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
+                 else: image_bgr = image_np 
+            elif image_np.ndim == 2: image_bgr = cv2.cvtColor(image_np, cv2.COLOR_GRAY2BGR)
+            else: logger.error(f"Cannot convert image shape {image_np.shape} to BGR for Canny."); return None
+
+            gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+            low_threshold = 100; high_threshold = 200
+            edges = cv2.Canny(gray, low_threshold, high_threshold)
+            edges_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB) 
+            return Image.fromarray(edges_rgb)
+        except Exception as e:
+            logger.error(f"Error creating Canny control image: {str(e)}", exc_info=True)
+            return None
+

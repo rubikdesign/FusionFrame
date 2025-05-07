@@ -11,7 +11,7 @@ from pathlib import Path
 class AppConfig:
     """Configurare globală pentru aplicație"""
     # Informații versiune
-    VERSION = "2.0.0"
+    VERSION = "1.0.0"
     APP_NAME = "FusionFrame"
     
     # Dispozitiv și tipuri de date
@@ -40,6 +40,35 @@ class AppConfig:
     LORA_DIR = os.path.join(BASE_DIR, "loras")
     LOGS_DIR = os.path.join(BASE_DIR, "logs")
     OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
+
+
+
+    CLIPSEG_DEFAULT_THRESHOLD = 0.35
+    CLIPSEG_BACKGROUND_THRESHOLD = 0.4
+    CLIPSEG_HAIR_THRESHOLD = 0.45
+    CLIPSEG_HEAD_THRESHOLD = 0.3
+    CLIPSEG_FACE_THRESHOLD = 0.35
+    CLIPSEG_EYES_THRESHOLD = 0.4
+    CLIPSEG_MOUTH_THRESHOLD = 0.35
+    CLIPSEG_NOSE_THRESHOLD = 0.3
+    CLIPSEG_PERSON_THRESHOLD = 0.5
+    CLIPSEG_CLOTHING_THRESHOLD = 0.4
+    CLIPSEG_SHIRT_THRESHOLD = 0.45
+    CLIPSEG_PANTS_THRESHOLD = 0.4
+    CLIPSEG_SHOES_THRESHOLD = 0.4
+    CLIPSEG_SKY_THRESHOLD = 0.4
+    CLIPSEG_TREE_THRESHOLD = 0.4
+    CLIPSEG_CAR_THRESHOLD = 0.4
+    CLIPSEG_CAT_THRESHOLD = 0.45
+    CLIPSEG_DOG_THRESHOLD = 0.45
+    CLIPSEG_BUILDING_THRESHOLD = 0.35
+    CLIPSEG_ROAD_THRESHOLD = 0.3
+    CLIPSEG_WATER_THRESHOLD = 0.3
+    CLIPSEG_OBJECT_THRESHOLD = 0.35
+    SAM_ASSISTED_THRESHOLD = 0.5  # Hypothetical threshold for SAM masks
+    HYBRID_MASK_THRESHOLD = 0.35
+
+
     
     # URL-uri pentru descărcare modele
     MODEL_URLS = {
