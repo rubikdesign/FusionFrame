@@ -1,4 +1,4 @@
-# FusionFrame 2.0
+# FusionFrame 1.0
 
 ![FusionFrame Logo](https://via.placeholder.com/800x200?text=FusionFrame+2.0)
 
