@@ -9,8 +9,8 @@ class ModelConfig:
     """Configurare centralizată pentru modelele AI și parametrii lor."""
 
     # --- Modele Principale și de Backup ---
-    MAIN_MODEL_NAME = "HiDream-I1-Full"  # Numele cheie pentru modelul principal (folosit intern)
-    BACKUP_MODEL_NAME = "HiDream-I1-Fast" # Numele cheie pentru modelul de backup (folosit intern)
+    MAIN_MODEL_NAME = "HiDream-I1-Full"
+    BACKUP_MODEL_NAME = "HiDream-I1-Fast"
 
     # --- Configurări Detaliate pentru Modele Specifice ---
 
@@ -19,7 +19,7 @@ class ModelConfig:
         "pretrained_model_name_or_path": "HiDream-ai/HiDream-I1-Full",
         "vae_name_or_path": "stabilityai/sdxl-vae",
         "use_safetensors": True,
-        "lora_weights": [],  # Lista de LoRA-uri active (structură: [{"name": "lora1", "path": "path1", "weight": 0.8}, ...])
+        "lora_weights": [],
         "inference_steps": 50
     }
 
@@ -53,13 +53,13 @@ class ModelConfig:
         "min_mask_region_area": 100
     }
 
-    # ControlNet (pentru ghidare condiționată SDXL)
+    # ControlNet (SDXL Canny)
     CONTROLNET_CONFIG = {
         "model_id": "diffusers/controlnet-canny-sdxl-1.0",
         "conditioning_scale": 0.7
     }
 
-    # CLIPSeg (pentru segmentare bazată pe text)
+    # CLIPSeg
     CLIP_CONFIG = {
         "model_id": "CIDAS/clipseg-rd64-refined"
     }
@@ -67,26 +67,33 @@ class ModelConfig:
     # Image Classifier (ViT)
     IMAGE_CLASSIFIER_CONFIG = {
         "model_id": "google/vit-base-patch16-224",
-        "top_n_results": 5 # Numărul de etichete relevante de returnat
+        "top_n_results": 5
     }
 
-    # NOU: Depth Estimator (DPT/MiDaS)
+    # Depth Estimator (DPT/MiDaS)
     DEPTH_ESTIMATOR_CONFIG = {
-        "model_id": "Intel/dpt-hybrid-midas" # Un bun echilibru între viteză și calitate
-        # Alternative: "Intel/dpt-large" (mai precis, mai lent), modele specifice MiDaS
+        "model_id": "Intel/dpt-hybrid-midas"
     }
 
-    # MediaPipe (segmentare selfie & detecție față)
-    # Notă: Acestea trebuie șterse/comentate din AppConfig dacă sunt definite aici
-    MEDIAPIPE_SELFIE_MODEL_SELECTION = 1 # 0: landscape, 1: general
-    MEDIAPIPE_FACE_MODEL_SELECTION = 0   # 0: short-range, 1: full-range
+    # Object Detector (YOLO) - Parametri specifici analizei
+    OBJECT_DETECTOR_CONFIG = {
+        # Presupunem că ModelManager încarcă YOLO sub cheia 'yolo'
+        # Poate fi adăugat 'model_name' aici dacă gestionăm mai multe YOLO.
+        "confidence_threshold": 0.4, # Prag pentru analiza obiectelor
+        "iou_threshold": 0.5          # Prag IoU pentru NMS în YOLO predict
+    }
+
+    # MediaPipe (Selfie Seg & Face Detection)
+    # Șterge/Comentează din AppConfig dacă sunt definite aici
+    MEDIAPIPE_SELFIE_MODEL_SELECTION = 1
+    MEDIAPIPE_FACE_MODEL_SELECTION = 0
     MEDIAPIPE_FACE_MIN_CONFIDENCE = 0.5
 
-    # Rembg (eliminare fundal)
-    # Notă: Acesta trebuie șters/comentat din AppConfig dacă este definit aici
+    # Rembg
+    # Șterge/Comentează din AppConfig dacă este definit aici
     REMBG_MODEL_NAME = "u2net"
 
-    # --- Alte Configurări Globale Legate de Modele ---
+    # --- Alte Configurări Globale ---
 
     # LoRA
     LORA_CONFIG = {
