@@ -3,10 +3,7 @@
 
 echo "===== Configurare mediu pentru FusionFrame 2.0 ====="
 echo "Creez mediul virtual..."
-pip install flash-attn==2.4.2 --no-build-isolation
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-pip uninstall xformers -y
-pip install -U xformers
+
 
 # Crearea mediului virtual
 python -m venv fusionframe_env
@@ -17,6 +14,12 @@ pip install --upgrade pip
 
 echo "Instalez dependențele..."
 pip install -r requirements.txt
+pip install flash-attn==2.4.2 --no-build-isolation
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+pip uninstall xformers -y
+pip install -U xformers
+pip install -U ultralytics
+pip install -U transformers
 
 # Modifică fișierul diffusers/utils/dynamic_modules_utils.py
 sed -i 's/from huggingface_hub import cached_download, hf_hub_download, model_info/from huggingface_hub import hf_hub_download, model_info\ntry:\n    from huggingface_hub import cached_download\nexcept ImportError:\n    cached_download = hf_hub_download/' /workspace/FusionFrame/fusionframe_env/lib/python3.10/site-packages/diffusers/utils/dynamic_modules_utils.py
