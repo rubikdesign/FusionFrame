@@ -49,9 +49,11 @@ pip uninstall accelerate -y # Dezinstalăm întâi pentru o actualizare curată
 pip install -U "accelerate>=0.27.0" # Specificăm o versiune minimă rezonabilă
 
 # flash-attn (pip va alege una compatibilă cu PyTorch 2.7+ și CUDA)
+pip install ninja
+python -m pip install --upgrade pip wheel setuptools
 echo "Instalez flash-attn..."
 pip uninstall flash-attn -y
-pip install flash-attn --no-build-isolation 
+MAX_JOBS=4 python -m pip -v install flash-attn --no-build-isolation 
 # Dacă --no-build-isolation continuă să dea erori, încercați fără el,
 # dar cu wheel instalat ar trebui să fie ok.
 
