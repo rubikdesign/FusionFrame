@@ -8,6 +8,8 @@ Componente pentru interfața Gradio în FusionFrame 2.0
 import gradio as gr
 from typing import List, Tuple, Any
 
+from config.app_config import AppConfig
+
 def create_examples() -> List[List[Any]]:
     """
     Creează lista de exemple pentru interfață
@@ -80,4 +82,29 @@ def create_advanced_settings_panel() -> List[gr.components.Component]:
             info="Use ControlNet for better guidance (disable for lower VRAM usage)"
         )
     
-    return [num_steps, guidance, enhance_details, fix_faces, remove_artifacts, use_controlnet]
+    # Adăugăm controalele pentru refiner
+    with gr.Row():
+        use_refiner = gr.Checkbox(
+            value=AppConfig.USE_REFINER, 
+            label="Use SDXL Refiner", 
+            info="Apply SDXL refiner for better quality (requires more VRAM)"
+        )
+        refiner_strength = gr.Slider(
+            minimum=0.1,
+            maximum=0.8,
+            value=AppConfig.REFINER_STRENGTH,
+            step=0.05,
+            label="Refiner Strength",
+            info="How strongly to apply refinement (higher = more changes)",
+            visible=AppConfig.USE_REFINER
+        )
+    
+    # Facem ca refiner_strength să fie vizibil doar când use_refiner este activat
+    use_refiner.change(
+        fn=lambda x: {"visible": x},
+        inputs=[use_refiner],
+        outputs=[refiner_strength]
+    )
+    
+    return [num_steps, guidance, enhance_details, fix_faces, remove_artifacts, 
+            use_controlnet, use_refiner, refiner_strength]

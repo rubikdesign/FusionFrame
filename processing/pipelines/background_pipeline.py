@@ -35,6 +35,8 @@ class BackgroundPipeline(BasePipeline):
                prompt: str,
                strength: float = 0.75,
                progress_callback: Callable = None,
+               use_refiner: bool = None,
+               refiner_strength: float = None,
                **kwargs) -> Dict[str, Any]:
         """
         Procesează imaginea pentru a înlocui fundalul
@@ -44,6 +46,8 @@ class BackgroundPipeline(BasePipeline):
             prompt: Promptul pentru înlocuirea fundalului
             strength: Intensitatea înlocuirii (0.0-1.0)
             progress_callback: Funcție de callback pentru progres
+            use_refiner: Dacă să folosească refiner
+            refiner_strength: Intensitatea refiner-ului
             **kwargs: Argumentele adiționale pentru procesare
             
         Returns:
@@ -148,7 +152,9 @@ class BackgroundPipeline(BasePipeline):
                 strength=params['strength'],
                 num_inference_steps=params['num_inference_steps'],
                 guidance_scale=params['guidance_scale'],
-                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale')
+                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale'),
+                use_refiner=use_refiner,
+                refiner_strength=refiner_strength
             )
             
             if result['success']:

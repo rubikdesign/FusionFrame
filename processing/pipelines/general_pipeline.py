@@ -30,7 +30,24 @@ class GeneralPipeline(BasePipeline):
                 prompt: str,
                 strength: float = 0.75,
                 progress_callback: Callable = None,
+                use_refiner: bool = None,
+                refiner_strength: float = None,
                 **kwargs) -> Dict[str, Any]:
+        """
+        Procesează imaginea folosind pipeline-ul general
+        
+        Args:
+            image: Imaginea de procesat
+            prompt: Promptul pentru procesare
+            strength: Intensitatea procesării (0.0-1.0)
+            progress_callback: Funcție de callback pentru progres
+            use_refiner: Dacă să folosească refiner
+            refiner_strength: Intensitatea refiner-ului
+            **kwargs: Argumentele adiționale pentru procesare
+            
+        Returns:
+            Dicționar cu rezultatele procesării
+        """
         # Salvăm callback-ul de progres
         self.progress_callback = progress_callback
         # Determinăm tipul de operație din prompt
@@ -93,7 +110,9 @@ class GeneralPipeline(BasePipeline):
                 strength=strength,
                 num_inference_steps=params['num_inference_steps'],
                 guidance_scale=params['guidance_scale'],
-                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale')
+                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale'),
+                use_refiner=use_refiner,
+                refiner_strength=refiner_strength
             )
             # Extragem imaginea procesată
             result_image = output.images[0]

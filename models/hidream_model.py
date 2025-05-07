@@ -29,20 +29,31 @@ class HiDreamModel(BaseModel):
     
     def __init__(self, 
                 model_id: str = ModelConfig.MAIN_MODEL, 
-                device: Optional[str] = None):
+                device: Optional[str] = None,
+                use_refiner: bool = None):  # Adăugat parametru pentru refiner
         """
         Inițializare pentru modelul HiDream
         
         Args:
-            model_id: Identificatorul modelului (implicit HiDream-E1-Full)
+            model_id: Identificatorul modelului (implicit HiDream-I1-Full)
             device: Dispozitivul pe care va rula modelul (implicit din AppConfig)
+            use_refiner: Dacă se folosește refiner-ul
         """
         super().__init__(model_id, device)
         
         self.config = ModelConfig.HIDREAM_CONFIG
+        self.refiner_config = ModelConfig.REFINER_CONFIG
+        
+        # Utilizează valoarea din configurație dacă nu este specificată explicit
+        if use_refiner is None:
+            use_refiner = AppConfig.USE_REFINER
+            
+        self.use_refiner = use_refiner and self.refiner_config.get("enabled", False)
+        
         self.vae = None
         self.controlnet = None
         self.pipeline = None
+        self.refiner = None  # Adăugăm refiner
         self.lora_weights = []
     
     def load(self) -> bool:
@@ -52,7 +63,7 @@ class HiDreamModel(BaseModel):
         Returns:
             True dacă încărcarea a reușit, False altfel
         """
-        logger.info(f"Loading HiDream model '{self.model_id}'")
+        logger.info(f"Loading HiDream model '{self.model_id}' with refiner={self.use_refiner}")
         
         try:
             from diffusers import (
@@ -110,6 +121,30 @@ class HiDreamModel(BaseModel):
                 use_karras_sigmas=True
             )
             
+            # Încarcă refiner-ul dacă este activat
+            if self.use_refiner:
+                logger.info("Loading SDXL refiner")
+                self.refiner = StableDiffusionXLInpaintPipeline.from_pretrained(
+                    self.refiner_config["pretrained_model_name_or_path"],
+                    vae=self.vae,  # Reutilizăm același VAE
+                    torch_dtype=AppConfig.DTYPE,
+                    variant="fp16" if AppConfig.DTYPE == torch.float16 else None,
+                    use_safetensors=self.refiner_config["use_safetensors"],
+                    cache_dir=AppConfig.CACHE_DIR
+                )
+                
+                if AppConfig.LOW_VRAM_MODE:
+                    self.refiner.enable_model_cpu_offload()
+                else:
+                    self.refiner.to(self.device)
+                    
+                # Setăm același scheduler și pentru refiner
+                self.refiner.scheduler = DPMSolverMultistepScheduler.from_config(
+                    self.refiner.scheduler.config,
+                    algorithm_type="sde-dpmsolver++",
+                    use_karras_sigmas=True
+                )
+            
             # Încarcă LoRA-urile configurate
             if self.config["lora_weights"]:
                 self._load_loras()
@@ -154,6 +189,7 @@ class HiDreamModel(BaseModel):
             self.vae = None
             self.controlnet = None
             self.pipeline = None
+            self.refiner = None
             self.model = None
             
             # Curăță memoria
@@ -173,9 +209,10 @@ class HiDreamModel(BaseModel):
                prompt: str,
                negative_prompt: Optional[str] = None,
                strength: float = 0.75,
-               num_inference_steps: int = 50,
+               num_inference_steps: int = None,
                guidance_scale: float = 7.5,
                controlnet_conditioning_scale: Optional[float] = None,
+               refiner_strength: float = None,  # Adăugăm parametru pentru refiner strength
                **kwargs) -> Dict[str, Any]:
         """
         Procesează imaginea folosind modelul HiDream
@@ -189,6 +226,7 @@ class HiDreamModel(BaseModel):
             num_inference_steps: Numărul de pași de inferență
             guidance_scale: Factorul de ghidare
             controlnet_conditioning_scale: Factorul pentru controlnet
+            refiner_strength: Intensitatea refiner-ului (0.0-1.0)
             **kwargs: Argumentele adiționale pentru pipeline
             
         Returns:
@@ -218,6 +256,13 @@ class HiDreamModel(BaseModel):
         # Pregătim parametrii
         generator = torch.Generator(device=self.device).manual_seed(kwargs.get('seed', 42))
         
+        # Utilizăm valorile din configurație dacă nu sunt specificate explicit
+        if num_inference_steps is None:
+            num_inference_steps = self.config.get("inference_steps", ModelConfig.GENERATION_PARAMS["default_steps"])
+            
+        if refiner_strength is None:
+            refiner_strength = AppConfig.REFINER_STRENGTH
+        
         # Setăm promptul negativ implicit dacă nu este furnizat
         if negative_prompt is None:
             negative_prompt = ModelConfig.GENERATION_PARAMS["negative_prompt"]
@@ -228,7 +273,7 @@ class HiDreamModel(BaseModel):
             controlnet_args["controlnet_conditioning_scale"] = controlnet_conditioning_scale
         
         try:
-            # Generăm rezultatul
+            # Generăm rezultatul cu modelul principal
             result = self.pipeline(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
@@ -242,11 +287,30 @@ class HiDreamModel(BaseModel):
                 **kwargs
             )
             
+            # Folosim refiner-ul dacă este activat
+            if self.use_refiner and self.refiner is not None:
+                logger.info(f"Applying SDXL refiner with strength {refiner_strength}")
+                refiner_steps = self.refiner_config.get("inference_steps", num_inference_steps // 2)
+                
+                refined_result = self.refiner(
+                    prompt=prompt,
+                    negative_prompt=negative_prompt,
+                    image=result.images[0],  # Folosim rezultatul de la modelul principal
+                    mask_image=mask_pil,
+                    num_inference_steps=refiner_steps,
+                    guidance_scale=guidance_scale,
+                    strength=refiner_strength,  # Folosim refiner_strength
+                    generator=generator
+                )
+                result_image = refined_result.images[0]
+            else:
+                result_image = result.images[0]
+            
             # Returnăm rezultatul
             return {
-                'result': result.images[0],
+                'result': result_image,
                 'success': True,
-                'message': "Procesare completă cu succes"
+                'message': "Procesare completă cu succes" + (" (cu refiner)" if self.use_refiner else "")
             }
             
         except Exception as e:
@@ -270,6 +334,8 @@ class HiDreamModel(BaseModel):
         info.update({
             "config": self.config,
             "has_controlnet": self.controlnet is not None,
+            "has_refiner": self.refiner is not None,
+            "use_refiner": self.use_refiner,
             "lora_weights": self.lora_weights,
             "vram_usage": torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
         })

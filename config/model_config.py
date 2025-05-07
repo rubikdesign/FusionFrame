@@ -9,28 +9,39 @@ class ModelConfig:
     """Configurare pentru modelele AI"""
     
     # Modele principale pentru editare
-    MAIN_MODEL = "HiDream-E1-Full"  # model specializat pentru editare bazată pe instrucțiuni
-    BACKUP_MODEL = "FLUX.1-dev"     # model alternativ pentru cazuri specifice
+    MAIN_MODEL = "HiDream-I1-Full"  # Schimbat din HiDream-E1-Full la HiDream-I1-Full
+    BACKUP_MODEL = "HiDream-I1-Fast"  # Model alternativ cu mai puține pași (16 vs 50)
     
     # Configurări pentru modelul principal
     HIDREAM_CONFIG = {
-        "pretrained_model_name_or_path": "stabilityai/stable-diffusion-xl-base-1.0",
-        "vae_name_or_path": "stabilityai/sdxl-vae",
+        "pretrained_model_name_or_path": "HiDream-ai/HiDream-I1-Full",  # URL-ul modelului HiDream-I1-Full
+        "vae_name_or_path": "stabilityai/sdxl-vae",  # Se păstrează VAE-ul de la SDXL
         "custom_pipeline": "hidream_pipeline",
         "use_safetensors": True,
-        "lora_weights": []  # Lista de LoRA-uri care vor fi încărcate
+        "lora_weights": [],  # Lista de LoRA-uri care vor fi încărcate
+        "inference_steps": 50  # Pași de inferență conform tabelului pentru HiDream-I1-Full
+    }
+    
+    # Configurări pentru refiner SDXL
+    REFINER_CONFIG = {
+        "enabled": True,  # Activăm refiner-ul implicit
+        "pretrained_model_name_or_path": "stabilityai/stable-diffusion-xl-refiner-1.0",
+        "vae_name_or_path": "stabilityai/sdxl-vae",
+        "use_safetensors": True,
+        "inference_steps": 25  # Jumătate din pașii modelului principal pentru refiner
     }
     
     # Configurări pentru modelul de backup
     FLUX_CONFIG = {
-        "pretrained_model_name_or_path": "stabilityai/stable-diffusion-xl-base-1.0",
+        "pretrained_model_name_or_path": "HiDream-ai/HiDream-I1-Fast",  # Versiunea Fast pentru backup
         "vae_name_or_path": "stabilityai/sdxl-vae",
-        "custom_pipeline": "flux_pipeline",
+        "custom_pipeline": "hidream_pipeline",
         "use_safetensors": True,
-        "lora_weights": []  # Lista de LoRA-uri care vor fi încărcate
+        "lora_weights": [],  # Lista de LoRA-uri care vor fi încărcate
+        "inference_steps": 16  # Pași de inferență conform tabelului pentru HiDream-I1-Fast
     }
     
-    # Configurări pentru modele auxiliare
+    # Configurări pentru modelele auxiliare
     SAM_CONFIG = {
         "model_type": "vit_h",
         "checkpoint": "sam_vit_h_4b8939.pth",
@@ -57,7 +68,7 @@ class ModelConfig:
     
     # Parametrii pentru generare
     GENERATION_PARAMS = {
-        "default_steps": 50,
+        "default_steps": 50,  # Conform tabelului pentru HiDream-I1-Full
         "max_steps": 80,
         "guidance_scale": 7.5,
         "negative_prompt": "blurry, distorted, deformed, low quality, low resolution, bad anatomy, artifacts, watermark"

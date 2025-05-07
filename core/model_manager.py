@@ -148,73 +148,32 @@ class ModelManager:
         
         return model_path
     
-    def load_main_model(self) -> None:
+    def load_main_model(self, use_refiner: bool = None) -> None:
         """
         Încarcă modelul principal (HiDream) pentru editare
+        
+        Args:
+            use_refiner: Dacă se folosește refiner-ul (opțional)
         """
         logger.info("Loading main HiDream model...")
         
         try:
-            from diffusers import (
-                StableDiffusionXLInpaintPipeline,
-                AutoencoderKL,
-                DPMSolverMultistepScheduler,
-                ControlNetModel
+            from models.hidream_model import HiDreamModel
+            
+            # Creăm instanța de model cu opțiunea pentru refiner
+            model = HiDreamModel(
+                model_id=self.model_config.MAIN_MODEL,
+                device=self.config.DEVICE,
+                use_refiner=use_refiner
             )
             
-            # Încarcă VAE
-            vae = AutoencoderKL.from_pretrained(
-                self.model_config.HIDREAM_CONFIG["vae_name_or_path"],
-                torch_dtype=self.config.DTYPE,
-                cache_dir=self.config.CACHE_DIR
-            ).to(self.config.DEVICE)
-            
-            # Încarcă ControlNet dacă este necesar
-            controlnet = None
-            if self.model_config.CONTROLNET_CONFIG:
-                try:
-                    controlnet = ControlNetModel.from_pretrained(
-                        self.model_config.CONTROLNET_CONFIG["model_id"],
-                        torch_dtype=self.config.DTYPE,
-                        use_safetensors=True,
-                        variant="fp16" if self.config.DTYPE == torch.float16 else None,
-                        cache_dir=self.config.CACHE_DIR
-                    ).to(self.config.DEVICE)
-                except Exception as e:
-                    logger.error(f"Error loading ControlNet: {e}")
-                    logger.info("Continuing without ControlNet")
-            
-            # Încarcă modelul principal
-            pipeline = StableDiffusionXLInpaintPipeline.from_pretrained(
-                self.model_config.HIDREAM_CONFIG["pretrained_model_name_or_path"],
-                vae=vae,
-                torch_dtype=self.config.DTYPE,
-                variant="fp16" if self.config.DTYPE == torch.float16 else None,
-                use_safetensors=True,
-                cache_dir=self.config.CACHE_DIR
-            )
-            
-            # Adaugă controlnet la pipeline dacă este disponibil
-            if controlnet is not None:
-                pipeline.controlnet = controlnet
-            
-            # Optimizări pentru VRAM scăzut
-            if self.config.LOW_VRAM_MODE:
-                pipeline.enable_model_cpu_offload()
+            # Încărcăm modelul
+            if model.load():
+                self.models['main'] = model
+                logger.info("Main model loaded successfully")
             else:
-                pipeline.to(self.config.DEVICE)
-            
-            # Setează scheduler optimizat
-            pipeline.scheduler = DPMSolverMultistepScheduler.from_config(
-                pipeline.scheduler.config,
-                algorithm_type="sde-dpmsolver++",
-                use_karras_sigmas=True
-            )
-            
-            # Adaugă modelul la dicționar
-            self.models['main'] = pipeline
-            logger.info("Main model loaded successfully")
-            
+                logger.error("Failed to load main model")
+                
         except Exception as e:
             logger.error(f"Error loading main model: {e}")
             raise RuntimeError(f"Failed to load main model: {str(e)}")

@@ -50,7 +50,7 @@ class FusionFrameUI:
         logger.info("Loading core models...")
         try:
             # Încărcăm doar modelele esențiale la pornire, restul se vor încărca la cerere
-            self.model_manager.load_main_model()
+            self.model_manager.load_main_model(use_refiner=AppConfig.USE_REFINER)
             logger.info("Core models loaded successfully")
         except Exception as e:
             logger.error(f"Error loading core models: {str(e)}")
@@ -193,7 +193,9 @@ class FusionFrameUI:
                      enhance_details=True,
                      fix_faces=True,
                      remove_artifacts=True,
-                     use_controlnet=True):
+                     use_controlnet=True,
+                     use_refiner=None,
+                     refiner_strength=None):
         """
         Procesează imaginea conform promptului utilizatorului
         
@@ -207,6 +209,8 @@ class FusionFrameUI:
             fix_faces: Dacă se aplică corectarea fețelor
             remove_artifacts: Dacă se aplică eliminarea artefactelor
             use_controlnet: Dacă se folosește ControlNet
+            use_refiner: Dacă se folosește refiner-ul
+            refiner_strength: Intensitatea refiner-ului
             
         Returns:
             Tuple cu imaginea rezultată, masca și informațiile de operație
@@ -237,7 +241,9 @@ class FusionFrameUI:
                 progress_callback=progress_callback,
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
-                use_controlnet=use_controlnet
+                use_controlnet=use_controlnet,
+                use_refiner=use_refiner,
+                refiner_strength=refiner_strength
             )
             
             # Calculăm timpul de procesare

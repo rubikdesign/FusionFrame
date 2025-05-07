@@ -42,7 +42,7 @@ cat > run_fusionframe.sh << 'EOL'
 #!/bin/bash
 source fusionframe_env/bin/activate
 export PYTHONPATH=$PYTHONPATH:$(pwd)
-python fusionframe/app.py "$@"
+python app.py "$@"
 EOL
 
 chmod +x run_fusionframe.sh

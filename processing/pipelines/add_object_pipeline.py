@@ -26,21 +26,25 @@ class AddObjectPipeline(BasePipeline):
         self.operation_analyzer = OperationAnalyzer()
 
     def process(self,
-                image: Union[Image.Image, np.ndarray],
-                prompt: str,
-                strength: float = 0.75,
-                progress_callback: Callable = None,
-                **kwargs) -> Dict[str, Any]:
+               image: Union[Image.Image, np.ndarray],
+               prompt: str,
+               strength: float = 0.75,
+               progress_callback: Callable = None,
+               use_refiner: bool = None,
+               refiner_strength: float = None,
+               **kwargs) -> Dict[str, Any]:
         self.progress_callback = progress_callback
         operation = self.operation_analyzer.analyze_operation(prompt)
         if "glasses" in prompt.lower() or "ochelari" in prompt.lower():
-            return self.add_glasses(image, operation, strength, **kwargs)
-        return self.add_generic_object(image, operation, strength, **kwargs)
+            return self.add_glasses(image, operation, strength, use_refiner=use_refiner, refiner_strength=refiner_strength, **kwargs)
+        return self.add_generic_object(image, operation, strength, use_refiner=use_refiner, refiner_strength=refiner_strength, **kwargs)
 
     def add_glasses(self,
                     image: Union[Image.Image, np.ndarray],
                     operation: Dict[str, Any],
                     strength: float = 0.75,
+                    use_refiner: bool = None,
+                    refiner_strength: float = None,
                     **kwargs) -> Dict[str, Any]:
         # Convertim la format potrivit
         if isinstance(image, np.ndarray):
@@ -105,7 +109,9 @@ class AddObjectPipeline(BasePipeline):
                 strength=params['strength'],
                 num_inference_steps=params['num_inference_steps'],
                 guidance_scale=params['guidance_scale'],
-                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale')
+                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale'),
+                use_refiner=use_refiner,
+                refiner_strength=refiner_strength
             )
             if result['success']:
                 try:
@@ -127,6 +133,8 @@ class AddObjectPipeline(BasePipeline):
                            image: Union[Image.Image, np.ndarray],
                            operation: Dict[str, Any],
                            strength: float = 0.75,
+                           use_refiner: bool = None,
+                           refiner_strength: float = None,
                            **kwargs) -> Dict[str, Any]:
         if isinstance(image, np.ndarray):
             image_np = image
@@ -172,7 +180,9 @@ class AddObjectPipeline(BasePipeline):
                 strength=strength,
                 num_inference_steps=params['num_inference_steps'],
                 guidance_scale=params['guidance_scale'],
-                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale')
+                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale'),
+                use_refiner=use_refiner,
+                refiner_strength=refiner_strength
             )
             if result['success']:
                 self._update_progress(1.0, desc="Procesare completă!")
@@ -185,6 +195,8 @@ class AddObjectPipeline(BasePipeline):
                       image: Union[Image.Image, np.ndarray],
                       operation: Dict[str, Any],
                       strength: float = 0.75,
+                      use_refiner: bool = None,
+                      refiner_strength: float = None,
                       **kwargs) -> Dict[str, Any]:
         if isinstance(image, np.ndarray):
             image_np = image
@@ -227,7 +239,9 @@ class AddObjectPipeline(BasePipeline):
                 strength=params['strength'],
                 num_inference_steps=params['num_inference_steps'],
                 guidance_scale=params['guidance_scale'],
-                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale')
+                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale'),
+                use_refiner=use_refiner,
+                refiner_strength=refiner_strength
             )
             if result['success']:
                 self._update_progress(1.0, desc="Procesare completă!")

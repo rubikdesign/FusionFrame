@@ -35,6 +35,8 @@ class ColorChangePipeline(BasePipeline):
                prompt: str,
                strength: float = 0.75,
                progress_callback: Callable = None,
+               use_refiner: bool = None,
+               refiner_strength: float = None,
                **kwargs) -> Dict[str, Any]:
         """
         Procesează imaginea pentru a schimba culoarea unui obiect
@@ -44,6 +46,8 @@ class ColorChangePipeline(BasePipeline):
             prompt: Promptul pentru schimbarea culorii
             strength: Intensitatea schimbării (0.0-1.0)
             progress_callback: Funcție de callback pentru progres
+            use_refiner: Dacă să folosească refiner
+            refiner_strength: Intensitatea refiner-ului
             **kwargs: Argumentele adiționale pentru procesare
             
         Returns:
@@ -57,14 +61,16 @@ class ColorChangePipeline(BasePipeline):
         
         # Decidem procesul în funcție de target
         if 'hair' in target.lower():
-            return self.change_hair_color(image, operation, strength, **kwargs)
+            return self.change_hair_color(image, operation, strength, use_refiner=use_refiner, refiner_strength=refiner_strength, **kwargs)
         else:
-            return self.change_object_color(image, operation, strength, **kwargs)
+            return self.change_object_color(image, operation, strength, use_refiner=use_refiner, refiner_strength=refiner_strength, **kwargs)
     
     def change_hair_color(self,
                         image: Union[Image.Image, np.ndarray],
                         operation: Dict[str, Any],
                         strength: float = 0.75,
+                        use_refiner: bool = None,
+                        refiner_strength: float = None,
                         **kwargs) -> Dict[str, Any]:
         """
         Schimbă culoarea părului
@@ -73,6 +79,8 @@ class ColorChangePipeline(BasePipeline):
             image: Imaginea de procesat
             operation: Detalii despre operație
             strength: Intensitatea schimbării (0.0-1.0)
+            use_refiner: Dacă să folosească refiner
+            refiner_strength: Intensitatea refiner-ului
             **kwargs: Argumentele adiționale pentru procesare
             
         Returns:
@@ -147,7 +155,9 @@ class ColorChangePipeline(BasePipeline):
                 strength=params['strength'],
                 num_inference_steps=params['num_inference_steps'],
                 guidance_scale=params['guidance_scale'],
-                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale')
+                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale'),
+                use_refiner=use_refiner,
+                refiner_strength=refiner_strength
             )
             
             if result['success']:
@@ -191,6 +201,8 @@ class ColorChangePipeline(BasePipeline):
                           image: Union[Image.Image, np.ndarray],
                           operation: Dict[str, Any],
                           strength: float = 0.75,
+                          use_refiner: bool = None,
+                          refiner_strength: float = None,
                           **kwargs) -> Dict[str, Any]:
         """
         Schimbă culoarea unui obiect
@@ -199,6 +211,8 @@ class ColorChangePipeline(BasePipeline):
             image: Imaginea de procesat
             operation: Detalii despre operație
             strength: Intensitatea schimbării (0.0-1.0)
+            use_refiner: Dacă să folosească refiner
+            refiner_strength: Intensitatea refiner-ului
             **kwargs: Argumentele adiționale pentru procesare
             
         Returns:
@@ -274,7 +288,9 @@ class ColorChangePipeline(BasePipeline):
                 strength=params['strength'],
                 num_inference_steps=params['num_inference_steps'],
                 guidance_scale=params['guidance_scale'],
-                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale')
+                controlnet_conditioning_scale=params.get('controlnet_conditioning_scale'),
+                use_refiner=use_refiner,
+                refiner_strength=refiner_strength
             )
             
             if result['success']:

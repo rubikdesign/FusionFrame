@@ -48,6 +48,8 @@ class AppConfig:
         "gpen": "https://github.com/yangxy/GPEN/releases/download/v1.0/GPEN-BFR-512.pth",
         "codeformer": "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth",
         "esrgan": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
+        # Adăugăm URL-uri pentru modelele HiDream-I1 dacă sunt necesare
+        "hidream-i1": "https://huggingface.co/HiDream-ai/HiDream-I1-Full/resolve/main/pytorch_model.safetensors",
     }
     
     # Parametri pentru calitate și generare
@@ -56,6 +58,10 @@ class AppConfig:
     DEFAULT_GUIDANCE_SCALE = 7.5
     DEFAULT_STEPS = 50
     MAX_STEPS = 80
+    
+    # Setări pentru refiner
+    USE_REFINER = True  # Activăm refiner-ul implicit
+    REFINER_STRENGTH = 0.3  # Valoarea implicită pentru intensitatea refiner-ului
     
     @classmethod
     def ensure_dirs(cls):
