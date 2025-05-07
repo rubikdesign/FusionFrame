@@ -2,644 +2,651 @@
 # -*- coding: utf-8 -*-
 
 """
-MaskGenerator v3.1 — Inteligent, operation-aware mask generation
-for FusionFrame. Prioritizes semantic understanding of the prompt.
-Includes more specific rules and refined CLIPSeg prompting.
+MaskGenerator v4.0 — Integrare SAM + Context ImageAnalyzer
+Prioritizează SAM ghidat de YOLO/Context, folosește CLIPSeg/Altele ca fallback.
 """
 
 import cv2
 import numpy as np
 import logging
-import torch # Rămâne pentru tipare, deși CLIPSeg intern folosește torch
+import torch # Rămâne pentru tipare și inferența SAM
 from typing import Dict, Any, Union, Callable, Optional, List, Tuple
 from PIL import Image
+import time # Pentru debug timp
 
-# Presupunem că AppConfig real va fi folosit și va conține aceste chei.
-# Pentru testare standalone, AppConfigMock este util.
-try:
-    from config.app_config import AppConfig
-except ImportError:
-    # Acest logger s-ar putea să nu fie configurat încă dacă AppConfig nu e găsit
-    # și setup_logging nu a rulat.
-    print("WARNING: AppConfig not found, using AppConfigMock. Ensure AppConfig is in PYTHONPATH for actual use.")
-    class AppConfigMock:
-        def __init__(self):
-            self._config = {
-                "CLIPSEG_DEFAULT_THRESHOLD": 0.35,
-                "CLIPSEG_BACKGROUND_THRESHOLD": 0.4,
-                "CLIPSEG_HAIR_THRESHOLD": 0.45,
-                "CLIPSEG_HEAD_THRESHOLD": 0.3,
-                "CLIPSEG_FACE_THRESHOLD": 0.35,
-                "CLIPSEG_EYES_THRESHOLD": 0.4,
-                "CLIPSEG_PERSON_THRESHOLD": 0.5,
-                "CLIPSEG_CLOTHING_THRESHOLD": 0.4, # Prag general pentru haine
-                "CLIPSEG_SHIRT_THRESHOLD": 0.45, # Mai specific pentru cămăși/tricouri
-                "CLIPSEG_SKY_THRESHOLD": 0.4,
-                "CLIPSEG_TREE_THRESHOLD": 0.4,
-                "CLIPSEG_CAR_THRESHOLD": 0.4,
-                "CLIPSEG_CAT_THRESHOLD": 0.45,
-                "CLIPSEG_DOG_THRESHOLD": 0.45,
-                "CLIPSEG_OBJECT_THRESHOLD": 0.35, # Prag mai mic pentru obiecte generice, poate necesita ajustare
-                "HYBRID_MASK_THRESHOLD": 0.35,
-            }
-        def get(self, key: str, default: Any = None) -> Any:
-            return self._config.get(key, default)
-    AppConfig = AppConfigMock
-
+try: from config.app_config import AppConfig
+except ImportError: print("WARNING: AppConfig not found, using Mock."); from .utils import AppConfigMock; AppConfig = AppConfigMock
 
 from core.model_manager import ModelManager
+# NOU: Importăm și ImageAnalyzer pentru a putea folosi contextul dacă nu e pasat
+from processing.analyzer import ImageAnalyzer
 
 logger = logging.getLogger(__name__)
-# Configurare de bază a logger-ului dacă nu este deja configurat
-# Acest lucru este important mai ales dacă AppConfigMock este folosit și AppConfig.setup_logging() nu a rulat.
-if not logger.hasHandlers() or not any(isinstance(h, logging.StreamHandler) for h in logger.handlers): # Verificăm și dacă are deja un StreamHandler
-    # Adăugăm un handler de consolă dacă nu există niciunul, pentru a vedea logurile
-    # Chiar dacă AppConfig.setup_logging() va rula ulterior, acest lucru asigură vizibilitatea logurilor devreme.
-    _console_handler = logging.StreamHandler()
-    _console_handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-    logger.addHandler(_console_handler)
-    if logger.level == logging.NOTSET: # Dacă nivelul nu a fost setat deloc
-        logger.setLevel(logging.INFO) # Setăm un default rezonabil
+if not logger.hasHandlers(): # Basic logging if not configured
+     _ch = logging.StreamHandler(); _ch.setFormatter(logging.Formatter("%(asctime)s %(levelname)s:%(name)s:%(message)s"))
+     logger.addHandler(_ch); logger.setLevel(logging.INFO)
 
-
-RuleCondition = Callable[[str, Dict[str, Any]], bool]
-MaskStrategy = Callable[[np.ndarray, str, Dict[str, Any], Dict[str, Any], Callable], Optional[np.ndarray]]
+# Tipuri pentru claritate
+RuleCondition = Callable[[str, Dict[str, Any], Optional[Dict[str, Any]]], bool] # Adăugat image_context opțional
+MaskStrategy = Callable[[np.ndarray, str, Dict[str, Any], Optional[Dict[str, Any]], Dict[str, Any], Callable], Optional[np.ndarray]] # Adăugat image_context opțional
 
 
 class MaskGenerator:
     def __init__(self):
-        logger.debug("Initializing MaskGenerator...")
+        logger.debug("Initializing MaskGenerator v4.0 (SAM Integration)...")
         self.models = ModelManager()
-        self.config = AppConfig() 
+        self.config = AppConfig() if 'AppConfig' in locals() and callable(AppConfig) else None # Folosim AppConfig real
+        if self.config is None: logger.error("AppConfig instance could not be created in MaskGenerator!"); # Ar trebui să fie fatal?
+        # NOU: Instanțiem ImageAnalyzer pentru a-l folosi dacă contextul nu e furnizat
+        self.image_analyzer = ImageAnalyzer()
         self.rules: List[Dict[str, Any]] = self._define_rules()
         logger.debug(f"MaskGenerator initialized with {len(self.rules)} rules.")
 
     def _define_rules(self) -> List[Dict[str, Any]]:
-        """Definește regulile de prioritate pentru generarea măștilor."""
-        
+        """Definește regulile de prioritate, acum cu condiții bazate și pe context și strategii SAM."""
+
+        # --- Helper Conditions ---
+        def is_op_type(op, types): return op.get("type") in types
+        def has_target(op, targets): return op.get("target_object", "").lower() in targets
+        def prompt_contains(prompt, words): return any(w in prompt.lower() for w in words)
+        def context_has_object(ctx, labels, min_conf=0.4): # Verifică dacă YOLO a detectat obiectul
+             if not ctx or 'detected_objects' not in ctx.get('scene_info',{}): return False
+             return any(obj.get('label') in labels and obj.get('confidence', 0) >= min_conf for obj in ctx['scene_info']['detected_objects'])
+
         rules = [
-            # Reguli foarte specifice și comune prima dată
+            # 1. Reguli SAM + YOLO (prioritate maximă dacă YOLO detectează obiectul țintă)
             {
-                "name": "Background Change/Remove",
-                "condition": lambda prompt, op: (op.get("type") in ("replace", "remove") and \
-                                                ("background" in prompt.lower() or op.get("target_object", "").lower() == "background")) or \
-                                                "background" in op.get("target_object", "").lower(),
-                "strategy": self._strategy_background,
-                "params": {}, 
+                "name": "SAM + YOLO: Person",
+                "condition": lambda p, op, ctx: (is_op_type(op, ["remove", "color", "replace", "add"]) and \
+                                                (has_target(op, ["person", "man", "woman", "boy", "girl", "child", "people", "human"]) or \
+                                                 prompt_contains(p, ["person", "man", "woman", "boy", "girl", "child", "people", "human"]))) and \
+                                                context_has_object(ctx, ["person"]),
+                "strategy": self._strategy_sam_yolo,
+                "params": {"yolo_labels": ["person"]}, # Label căutat în detecțiile YOLO
+                "message": "SAM mask guided by YOLO detection for Person"
+            },
+            {
+                "name": "SAM + YOLO: Car",
+                "condition": lambda p, op, ctx: (is_op_type(op, ["remove", "color", "replace", "add"]) and \
+                                                (has_target(op, ["car", "vehicle", "automobile"]) or prompt_contains(p, ["car", "vehicle"]))) and \
+                                                context_has_object(ctx, ["car", "truck", "bus"]), # Poate prinde și camioane/autobuze
+                "strategy": self._strategy_sam_yolo,
+                "params": {"yolo_labels": ["car", "truck", "bus"]},
+                "message": "SAM mask guided by YOLO detection for Car/Vehicle"
+            },
+             {
+                "name": "SAM + YOLO: Cat",
+                "condition": lambda p, op, ctx: (is_op_type(op, ["remove", "color", "replace", "add"]) and \
+                                                (has_target(op, ["cat", "kitten"]) or prompt_contains(p, ["cat", "kitten"]))) and \
+                                                context_has_object(ctx, ["cat"]),
+                "strategy": self._strategy_sam_yolo,
+                "params": {"yolo_labels": ["cat"]},
+                "message": "SAM mask guided by YOLO detection for Cat"
+            },
+             {
+                "name": "SAM + YOLO: Dog",
+                "condition": lambda p, op, ctx: (is_op_type(op, ["remove", "color", "replace", "add"]) and \
+                                                (has_target(op, ["dog", "puppy"]) or prompt_contains(p, ["dog", "puppy"]))) and \
+                                                context_has_object(ctx, ["dog"]),
+                "strategy": self._strategy_sam_yolo,
+                "params": {"yolo_labels": ["dog"]},
+                "message": "SAM mask guided by YOLO detection for Dog"
+            },
+            # Adaugă aici alte reguli SAM + YOLO pentru obiecte comune detectabile
+
+            # 2. Reguli Specifice (CLIPSeg sau alte metode, prioritate medie)
+             {
+                "name": "Background (Inverted Subject)",
+                "condition": lambda p, op, ctx: op.get("type") == "background" or has_target(op, ["background", "scene", "backdrop"]),
+                "strategy": self._strategy_background, # Folosește Rembg/MediaPipe/Grabcut
+                "params": {},
                 "message": "Background mask (inverted subject)"
             },
-            {
-                "name": "Hair Color/Style/Modification", 
-                "condition": lambda prompt, op: "hair" in prompt.lower() or \
-                                             op.get("target_object", "").lower() == "hair" or \
-                                             "hairstyle" in prompt.lower(),
+            {   "name": "Hair (CLIPSeg Refined)", "condition": lambda p, op, ctx: has_target(op, ["hair", "hairstyle"]) or prompt_contains(p, ["hair", "hairstyle"]),
                 "strategy": self._strategy_semantic_clipseg,
-                "params": {
-                    "main_clip_prompt_keyword": "hair",
-                    "refine_clip_prompt_keyword": "head", 
-                    "main_threshold_key": "CLIPSEG_HAIR_THRESHOLD",
-                    "refine_threshold_key": "CLIPSEG_HEAD_THRESHOLD",
-                    "combine_op": "and"
-                },
-                "message": "Hair mask"
+                "params": { "main_clip_prompt_keyword": "hair", "refine_clip_prompt_keyword": "head", "main_threshold_key": "CLIPSEG_HAIR_THRESHOLD", "refine_threshold_key": "CLIPSEG_HEAD_THRESHOLD", "combine_op": "and"}, "message": "Hair mask (CLIPSeg)"
             },
-            {
-                "name": "Eyes Color/Details",
-                "condition": lambda prompt, op: any(kw in prompt.lower() for kw in ["eye", "eyes"]) or \
-                                             op.get("target_object", "").lower() in ("eye", "eyes"),
+            {   "name": "Eyes (CLIPSeg Refined)", "condition": lambda p, op, ctx: has_target(op, ["eye", "eyes"]) or prompt_contains(p, ["eye", "eyes"]),
                 "strategy": self._strategy_semantic_clipseg,
-                "params": {
-                    "main_clip_prompt_keyword": "eyes",
-                    "refine_clip_prompt_keyword": "face",
-                    "main_threshold_key": "CLIPSEG_EYES_THRESHOLD",
-                    "refine_threshold_key": "CLIPSEG_FACE_THRESHOLD",
-                    "combine_op": "and"
-                },
-                "message": "Eyes mask"
+                "params": { "main_clip_prompt_keyword": "eyes", "refine_clip_prompt_keyword": "face", "main_threshold_key": "CLIPSEG_EYES_THRESHOLD", "refine_threshold_key": "CLIPSEG_FACE_THRESHOLD", "combine_op": "and"}, "message": "Eyes mask (CLIPSeg)"
             },
+            {   "name": "Glasses Area (CLIPSeg)", "condition": lambda p, op, ctx: has_target(op, ["glasses", "sunglasses"]) or prompt_contains(p, ["glasses", "sunglasses"]),
+                 "strategy": self._strategy_semantic_clipseg, # Sau SAM ghidat de 'eyes area'? Poate mai robust.
+                 "params": { "main_clip_prompt_keyword": "eyes area", "main_threshold_key": "CLIPSEG_EYES_THRESHOLD", "refine_clip_prompt_keyword": "face", "refine_threshold_key":"CLIPSEG_FACE_THRESHOLD", "combine_op":"and"}, "message": "Glasses area mask (CLIPSeg)"
+             },
+            {   "name": "Clothing (CLIPSeg Refined)", "condition": lambda p, op, ctx: has_target(op, ["shirt", "t-shirt", "top", "blouse", "jacket", "coat", "dress", "clothing"]) or prompt_contains(p, ["shirt", "jacket", "dress", "clothing"]), # Am simplificat prompt_contains
+                "strategy": self._strategy_semantic_clipseg,
+                "params": {"main_clip_prompt_keyword_from_op_target": True, "keywords_for_extraction":["shirt","t-shirt","top","blouse","jacket","coat","dress","clothing"], "main_threshold_key":"CLIPSEG_CLOTHING_THRESHOLD", "refine_clip_prompt_keyword":"person", "refine_threshold_key":"CLIPSEG_PERSON_THRESHOLD", "combine_op":"and"}, "message": "Clothing mask (CLIPSeg)"
+             },
+             {  "name": "Sky (CLIPSeg)", "condition": lambda p, op, ctx: has_target(op, ["sky"]) or prompt_contains(p, ["sky"]),
+                "strategy": self._strategy_semantic_clipseg, "params": {"main_clip_prompt_keyword": "sky", "main_threshold_key": "CLIPSEG_SKY_THRESHOLD"}, "message": "Sky mask (CLIPSeg)"
+             },
+             {  "name": "Tree (CLIPSeg)", "condition": lambda p, op, ctx: has_target(op, ["tree", "trees"]) or prompt_contains(p, ["tree", "trees"]),
+                 "strategy": self._strategy_semantic_clipseg, "params": {"main_clip_prompt_keyword": "tree", "main_threshold_key": "CLIPSEG_TREE_THRESHOLD"}, "message": "Tree mask (CLIPSeg)"
+             },
+
+            # 3. Regula Generică Obiect (SAM + YOLO dacă e detectat, altfel CLIPSeg)
             {
-                "name": "Add/Replace Glasses",
-                "condition": lambda prompt, op: "glasses" in prompt.lower() or \
-                                             op.get("target_object", "").lower() in ("glasses", "sunglasses"),
-                "strategy": self._strategy_semantic_clipseg,
-                "params": { 
-                    "main_clip_prompt_keyword": "face", 
-                    "refine_clip_prompt_keyword": "eyes area", 
-                    "main_threshold_key": "CLIPSEG_FACE_THRESHOLD",
-                    "refine_threshold_key": "CLIPSEG_EYES_THRESHOLD", 
-                    "combine_op": "and" 
-                },
-                "message": "Region for glasses"
-            },
-            {
-                "name": "Remove Person/Human",
-                "condition": lambda prompt, op: (op.get("type") == "remove" and \
-                                                self._extract_keyword_from_prompt(prompt.lower(), ["person", "man", "woman", "boy", "girl", "child", "people", "human"]) is not None) or \
-                                                op.get("target_object", "").lower() in ("person", "man", "woman", "boy", "girl", "child", "people", "human"),
-                "strategy": self._strategy_semantic_clipseg,
-                "params": {
-                    "main_clip_prompt_keyword_from_prompt": True, 
-                    "keywords_for_extraction": ["person", "man", "woman", "boy", "girl", "child", "people", "human"],
-                    "main_threshold_key": "CLIPSEG_PERSON_THRESHOLD",
-                },
-                "message": "Person mask for removal"
-            },
-            {
-                "name": "Change Shirt/Clothing Color",
-                "condition": lambda prompt, op: (op.get("type") == "color" and \
-                                                (self._extract_keyword_from_prompt(prompt.lower(), ["shirt", "t-shirt", "top", "blouse", "jacket", "coat", "dress", "clothing"]) is not None or \
-                                                 op.get("target_object", "").lower() in ["shirt", "t-shirt", "top", "blouse", "jacket", "coat", "dress"])) or \
-                                                 (op.get("target_object", "").lower() == "clothing" and "color" in prompt.lower()),
-                "strategy": self._strategy_semantic_clipseg,
-                "params": {
-                    "main_clip_prompt_keyword_from_prompt": True,
-                    "keywords_for_extraction": ["shirt", "t-shirt", "top", "blouse", "jacket", "coat", "dress", "clothing"],
-                    "main_threshold_key": "CLIPSEG_CLOTHING_THRESHOLD",
-                    "refine_clip_prompt_keyword": "person", 
-                    "refine_threshold_key": "CLIPSEG_PERSON_THRESHOLD",
-                    "combine_op": "and"
-                },
-                "message": "Clothing mask for color change"
-            },
-            {
-                "name": "Replace/Modify Sky",
-                "condition": lambda prompt, op: "sky" in prompt.lower() or op.get("target_object", "").lower() == "sky",
-                "strategy": self._strategy_semantic_clipseg,
-                "params": {
-                    "main_clip_prompt_keyword": "sky",
-                    "main_threshold_key": "CLIPSEG_SKY_THRESHOLD",
-                },
-                "message": "Sky mask"
-            },
-            {
-                "name": "Cat Interaction",
-                "condition": lambda prompt, op: "cat" in prompt.lower() or op.get("target_object", "").lower() == "cat",
-                "strategy": self._strategy_semantic_clipseg,
-                "params": {"main_clip_prompt_keyword": "cat", "main_threshold_key": "CLIPSEG_CAT_THRESHOLD"},
-                "message": "Cat mask"
-            },
-            {
-                "name": "Dog Interaction",
-                "condition": lambda prompt, op: "dog" in prompt.lower() or op.get("target_object", "").lower() == "dog",
-                "strategy": self._strategy_semantic_clipseg,
-                "params": {"main_clip_prompt_keyword": "dog", "main_threshold_key": "CLIPSEG_DOG_THRESHOLD"},
-                "message": "Dog mask"
-            },
-            {
-                "name": "Car Interaction",
-                "condition": lambda prompt, op: "car" in prompt.lower() or op.get("target_object", "").lower() == "car",
-                "strategy": self._strategy_semantic_clipseg,
-                "params": {"main_clip_prompt_keyword": "car", "main_threshold_key": "CLIPSEG_CAR_THRESHOLD"},
-                "message": "Car mask"
-            },
-            {
-                "name": "Tree Interaction",
-                "condition": lambda prompt, op: "tree" in prompt.lower() or op.get("target_object", "").lower() == "tree",
-                "strategy": self._strategy_semantic_clipseg,
-                "params": {"main_clip_prompt_keyword": "tree", "main_threshold_key": "CLIPSEG_TREE_THRESHOLD"},
-                "message": "Tree mask"
-            },
-            { # Regula generică pentru obiecte, acum un fallback mai jos în listă
-                "name": "Generic Object (from Operation Target)",
-                "condition": lambda prompt, op: bool(op.get("target_object")) and \
-                                             op.get("target_object") not in ["background", "hair", "eyes", "glasses", "person", "sky", "cat", "dog", "car", "tree", "clothing", "shirt"], # Adăugat clothing/shirt
-                "strategy": self._strategy_semantic_clipseg,
-                "params": {
-                    "main_clip_prompt_keyword_from_op_target": True, # Folosește operation['target_object']
-                    "main_threshold_key": "CLIPSEG_OBJECT_THRESHOLD",
-                },
-                "message": lambda op: f"{op.get('target_object', 'Identified Object').capitalize()} mask"
+                "name": "Generic Object (Try SAM+YOLO first, then CLIPSeg)",
+                "condition": lambda p, op, ctx: bool(op.get("target_object")) and not has_target(op, ["background", "hair", "eyes", "glasses", "person", "sky", "clothing", "shirt", "car", "cat", "dog", "tree"]), # Exclude cele deja tratate
+                "strategy": self._strategy_generic_object, # Strategie nouă care decide intern
+                "params": {}, # Parametrii sunt deduși în strategie
+                "message": lambda op: f"{op.get('target_object', 'Generic Object').capitalize()} mask (Auto strategy)"
             },
         ]
         logger.debug(f"Defined {len(rules)} mask generation rules.")
         return rules
 
+    # --- Metode Helper (Extracție, Prompting - păstrate și adaptate) ---
     def _extract_keyword_from_prompt(self, prompt_lower: str, keywords: List[str]) -> Optional[str]:
-        """Helper pentru a extrage primul cuvânt cheie (din lista keywords) găsit în prompt."""
+        """Helper simplu pentru extragere keyword."""
         for kw in keywords:
-            # Căutăm cuvântul cheie ca un cuvânt întreg pentru a evita potriviri parțiale (ex: "car" în "scarf")
-            # Folosim limite de cuvânt (\b) dacă nu este la început/sfârșit sau are spații în jur.
-            # O verificare simplă `in` poate fi prea largă.
-            # Pentru simplitate, păstrăm `in` dar conștientizăm limitarea.
-            # O soluție mai bună ar folosi regex: import re; if re.search(r'\b' + re.escape(kw) + r'\b', prompt_lower):
-            if kw in prompt_lower: 
-                return kw
+            # Folosim regex pentru potrivire cuvânt întreg
+            if re.search(r'\b' + re.escape(kw) + r'\b', prompt_lower): return kw
         return None
 
     def _get_clip_prompt_from_rule(self, prompt: str, operation: Dict[str, Any], rule_params: Dict[str, Any], param_key_base: str) -> Optional[str]:
-        lprompt = prompt.lower()
-        target_object_from_op = operation.get("target_object", "").lower()
-        default_keyword_from_rule = rule_params.get(f"{param_key_base}_keyword", "object of interest") # Un default mai generic
+        """Determină promptul text pentru CLIPSeg pe baza regulii."""
+        lprompt = prompt.lower(); target = operation.get("target_object", "").lower()
+        default_kw = rule_params.get(f"{param_key_base}_keyword", "area of interest")
 
         if rule_params.get(f"{param_key_base}_keyword_from_prompt", False):
-            specific_keywords = rule_params.get("keywords_for_extraction") 
-            if specific_keywords:
-                extracted = self._extract_keyword_from_prompt(lprompt, specific_keywords)
-                if extracted: 
-                    logger.debug(f"Extracted '{extracted}' from prompt for {param_key_base}")
-                    return extracted
-            # Fallback la target_object din operație dacă extracția din prompt eșuează
-            if target_object_from_op:
-                logger.debug(f"Using target_object '{target_object_from_op}' from operation for {param_key_base}")
-                return target_object_from_op
-            logger.debug(f"Falling back to default keyword '{default_keyword_from_rule}' for {param_key_base} (from_prompt rule)")
-            return default_keyword_from_rule
-
+            extracted = self._extract_keyword_from_prompt(lprompt, rule_params.get("keywords_for_extraction", []))
+            if extracted: return extracted
+            if target: return target # Fallback la target din op
+            return default_kw
         elif rule_params.get(f"{param_key_base}_keyword_from_op_target", False):
-            if target_object_from_op:
-                logger.debug(f"Using target_object '{target_object_from_op}' from operation for {param_key_base}")
-                return target_object_from_op
-            logger.debug(f"Falling back to default keyword '{default_keyword_from_rule}' for {param_key_base} (from_op_target rule)")
-            return default_keyword_from_rule
-        
-        else: # Caută un cuvânt cheie fix definit în regulă
-            fixed_keyword = rule_params.get(f"{param_key_base}_keyword")
-            logger.debug(f"Using fixed keyword '{fixed_keyword}' or default for {param_key_base}")
-            return fixed_keyword if fixed_keyword else default_keyword_from_rule
+            if target: return target
+            return default_kw
+        else: return rule_params.get(f"{param_key_base}_keyword", default_kw)
 
 
-    def _strategy_semantic_clipseg(self, img_np_bgr: np.ndarray, prompt: str, operation: Dict[str, Any], rule_params: Dict[str, Any], upd: Callable) -> Optional[np.ndarray]:
-        """Strategie bazată pe CLIPSeg, cu rafinare opțională. Primește imagine BGR."""
-        
+    # --- Strategii de Generare Măști ---
+
+    # NOU: Strategie SAM ghidată de Bounding Box din YOLO
+    def _strategy_sam_yolo(self, img_np_bgr: np.ndarray, prompt: str, operation: Dict[str, Any],
+                           image_context: Optional[Dict[str, Any]], rule_params: Dict[str, Any], upd: Callable) -> Optional[np.ndarray]:
+        """Strategie: Găsește obiectul cu YOLO, apoi segmentează cu SAM folosind box-ul."""
+        yolo_labels_to_find = rule_params.get("yolo_labels", [])
+        if not yolo_labels_to_find or not image_context:
+            logger.warning("SAM+YOLO strategy requires 'yolo_labels' in rule params and image_context."); return None
+
+        # 1. Găsește Bounding Box-ul relevant din context (de la ImageAnalyzer)
+        target_object_op = operation.get("target_object", "").lower() # Obiectul specificat în prompt/operație
+        best_box = None
+        highest_conf = 0.0
+        detected_objects = image_context.get('scene_info', {}).get('detected_objects', [])
+
+        if not detected_objects: logger.debug("No detected objects in context for SAM+YOLO."); return None
+
+        for obj in detected_objects:
+            label = obj.get('label')
+            conf = obj.get('confidence', 0)
+            box_norm = obj.get('box_normalized') # [x1, y1, x2, y2]
+            if label in yolo_labels_to_find and box_norm and conf > highest_conf:
+                # Verificăm dacă obiectul detectat se potrivește cât de cât cu cel din operație (dacă există)
+                # Exemplu simplu: dacă op e pt 'person', dar YOLO găsește și 'dog', luăm 'person'
+                is_primary_target = (target_object_op and label == target_object_op)
+                # Prioritizăm targetul exact, altfel luăm cea mai bună detecție din lista permisă
+                if is_primary_target or not best_box or (conf > highest_conf and not (best_box and best_box['label'] == target_object_op)):
+                    h, w = img_np_bgr.shape[:2]
+                    # Convertim box normalizat în coordonate absolute [x_min, y_min, x_max, y_max]
+                    box_abs = np.array([box_norm[0] * w, box_norm[1] * h, box_norm[2] * w, box_norm[3] * h]).astype(int)
+                    best_box = {'label': label, 'box': box_abs}
+                    highest_conf = conf
+
+        if best_box:
+            logger.info(f"SAM+YOLO: Found '{best_box['label']}' (conf: {highest_conf:.2f}). Using its box for SAM.")
+            upd(0.2, f"SAM prompt: Box for {best_box['label']}")
+            # 2. Rulează SAM cu bounding box-ul găsit
+            # Asigurăm că pasăm imaginea în format RGB NumPy la SAM
+            try: img_np_rgb = cv2.cvtColor(img_np_bgr, cv2.COLOR_BGR2RGB)
+            except Exception as e_conv: logger.error(f"BGR to RGB conversion failed for SAM: {e_conv}"); return None
+
+            sam_mask = self._sam_segment_box(img_np_rgb, best_box['box'])
+            if sam_mask is not None: upd(0.6, "SAM segmentation complete"); return sam_mask
+            else: logger.warning("SAM segmentation using YOLO box failed."); return None
+        else:
+            logger.info(f"SAM+YOLO: Target object(s) '{yolo_labels_to_find}' not detected with sufficient confidence by YOLO.")
+            return None # Fallback la altă regulă/strategie
+
+
+    # NOU: Strategie specifică pentru obiecte generice
+    def _strategy_generic_object(self, img_np_bgr: np.ndarray, prompt: str, operation: Dict[str, Any],
+                                 image_context: Optional[Dict[str, Any]], rule_params: Dict[str, Any], upd: Callable) -> Optional[np.ndarray]:
+        """Strategie pentru obiecte generice: încearcă SAM+YOLO, apoi CLIPSeg."""
+        target_object = operation.get("target_object", "").lower()
+        if not target_object: return None # Nu avem ce căuta
+
+        logger.info(f"Generic Object Strategy for: '{target_object}'")
+
+        # 1. Încearcă SAM + YOLO (folosind label-ul target)
+        if image_context:
+             upd(0.1, f"Trying SAM+YOLO for {target_object}")
+             sam_yolo_params = {"yolo_labels": [target_object]} # Căutăm exact obiectul
+             sam_mask = self._strategy_sam_yolo(img_np_bgr, prompt, operation, image_context, sam_yolo_params, lambda p,d: upd(0.1+p*0.4, d))
+             if sam_mask is not None:
+                  logger.info("Generic Object: SAM+YOLO succeeded.")
+                  return sam_mask
+             else:
+                  logger.info("Generic Object: SAM+YOLO failed or object not detected by YOLO.")
+
+        # 2. Fallback la CLIPSeg
+        upd(0.6, f"Trying CLIPSeg for {target_object}")
+        clipseg_params = {
+            "main_clip_prompt_keyword_from_op_target": True,
+            "main_threshold_key": "CLIPSEG_OBJECT_THRESHOLD",
+             "_rule_name_": "Generic Object Fallback (CLIPSeg)" # Nume pentru debugging
+        }
+        clip_mask = self._strategy_semantic_clipseg(img_np_bgr, prompt, operation, clipseg_params, lambda p,d: upd(0.6+p*0.4, d))
+        if clip_mask is not None:
+             logger.info("Generic Object: CLIPSeg fallback succeeded.")
+             return clip_mask
+        else:
+             logger.warning("Generic Object: CLIPSeg fallback also failed.")
+             return None
+
+
+    # Strategiile existente (CLIPSeg, Background) - adaptate să primească image_context (chiar dacă nu-l folosesc încă)
+    def _strategy_semantic_clipseg(self, img_np_bgr: np.ndarray, prompt: str, operation: Dict[str, Any],
+                                   image_context: Optional[Dict[str, Any]], rule_params: Dict[str, Any], upd: Callable) -> Optional[np.ndarray]:
+        """Strategie CLIPSeg (rămâne similară, dar primește context)."""
+        # (Codul intern al strategiei rămâne neschimbat, doar semnătura e adaptată)
         main_clip_text = self._get_clip_prompt_from_rule(prompt, operation, rule_params, "main_clip_prompt")
-        if not main_clip_text or not main_clip_text.strip():
-            logger.warning(f"Rule '{rule_params.get('_rule_name_', 'Unknown Semantic CLIPSeg')}' failed: main_clip_text is empty or could not be determined.")
-            return None
-            
+        if not main_clip_text: logger.warning(f"Rule '{rule_params.get('_rule_name_')}' failed: main_clip_text empty."); return None
         upd(0.1, f"CLIPSeg: '{main_clip_text}'")
-        main_seg = self._clipseg_segment(img_np_bgr, main_clip_text) # Pasăm BGR
-        if main_seg is None:
-            logger.warning(f"CLIPSeg failed for main prompt: '{main_clip_text}'")
-            return None
+        main_seg = self._clipseg_segment(img_np_bgr, main_clip_text)
+        if main_seg is None: logger.warning(f"CLIPSeg failed for '{main_clip_text}'."); return None
 
-        main_thresh_key = rule_params.get("main_threshold_key", "CLIPSEG_DEFAULT_THRESHOLD")
-        # Folosim un default global dacă cheia specifică nu e în config
-        main_thresh_factor = self.config.get(main_thresh_key, self.config.get("CLIPSEG_DEFAULT_THRESHOLD"))
-        main_thresh_val = int(main_thresh_factor * 255)
-        _, main_mask = cv2.threshold(main_seg, main_thresh_val, 255, cv2.THRESH_BINARY)
-        logger.debug(f"Applied threshold {main_thresh_val} ({main_thresh_factor*100:.0f}%) for main CLIPSeg mask '{main_clip_text}'.")
+        thresh_key = rule_params.get("main_threshold_key", "CLIPSEG_DEFAULT_THRESHOLD")
+        thresh_factor = self.config.get(thresh_key, self.config.get("CLIPSEG_DEFAULT_THRESHOLD", 0.35))
+        thresh_val = int(thresh_factor * 255)
+        _, main_mask = cv2.threshold(main_seg, thresh_val, 255, cv2.THRESH_BINARY)
+        logger.debug(f"Applied thresh {thresh_val} for '{main_clip_text}'.")
 
-        final_combined_mask = main_mask
-
+        final_mask = main_mask
         refine_clip_text = self._get_clip_prompt_from_rule(prompt, operation, rule_params, "refine_clip_prompt")
-
-        if refine_clip_text and refine_clip_text.strip():
+        if refine_clip_text:
             upd(0.3, f"CLIPSeg Refine: '{refine_clip_text}'")
-            refine_seg = self._clipseg_segment(img_np_bgr, refine_clip_text) # Pasăm BGR
+            refine_seg = self._clipseg_segment(img_np_bgr, refine_clip_text)
             if refine_seg is not None:
-                refine_thresh_key = rule_params.get("refine_threshold_key", "CLIPSEG_DEFAULT_THRESHOLD")
-                refine_thresh_factor = self.config.get(refine_thresh_key, self.config.get("CLIPSEG_DEFAULT_THRESHOLD"))
-                refine_thresh_val = int(refine_thresh_factor * 255)
-                _, refine_mask = cv2.threshold(refine_seg, refine_thresh_val, 255, cv2.THRESH_BINARY)
-                logger.debug(f"Applied threshold {refine_thresh_val} ({refine_thresh_factor*100:.0f}%) for refine CLIPSeg mask '{refine_clip_text}'.")
-                
-                combine_op = rule_params.get("combine_op", "and") 
-                if combine_op == "and":
-                    final_combined_mask = cv2.bitwise_and(main_mask, refine_mask)
-                elif combine_op == "or":
-                    final_combined_mask = cv2.bitwise_or(main_mask, refine_mask)
-                logger.debug(f"Combined main mask ('{main_clip_text}') and refine mask ('{refine_clip_text}') using '{combine_op}'.")
-            else:
-                logger.warning(f"CLIPSeg failed for refinement prompt: '{refine_clip_text}'. Using main mask only.")
-        
-        return final_combined_mask
+                ref_thresh_key = rule_params.get("refine_threshold_key", "CLIPSEG_DEFAULT_THRESHOLD")
+                ref_thresh_factor = self.config.get(ref_thresh_key, self.config.get("CLIPSEG_DEFAULT_THRESHOLD", 0.35))
+                ref_thresh_val = int(ref_thresh_factor * 255)
+                _, refine_mask = cv2.threshold(refine_seg, ref_thresh_val, 255, cv2.THRESH_BINARY)
+                logger.debug(f"Applied thresh {ref_thresh_val} for '{refine_clip_text}'.")
+                op = rule_params.get("combine_op", "and")
+                if op == "and": final_mask = cv2.bitwise_and(main_mask, refine_mask)
+                elif op == "or": final_mask = cv2.bitwise_or(main_mask, refine_mask)
+                logger.debug(f"Combined masks using '{op}'.")
+            else: logger.warning(f"CLIPSeg refine failed for '{refine_clip_text}'.")
+        return final_mask
 
-    def _strategy_background(self, img_np_bgr: np.ndarray, prompt: str, operation: Dict[str, Any], rule_params: Dict[str, Any], upd: Callable) -> Optional[np.ndarray]:
-        upd(0.1, "GrabCut: Subject for background")
-        raw_subj_mask = self._grabcut_subject(img_np_bgr) 
+    def _strategy_background(self, img_np_bgr: np.ndarray, prompt: str, operation: Dict[str, Any],
+                             image_context: Optional[Dict[str, Any]], rule_params: Dict[str, Any], upd: Callable) -> Optional[np.ndarray]:
+        """Strategie Background (folosește Rembg/MediaPipe/Grabcut)."""
+        # Încercăm întâi Rembg (mai robust de obicei)
+        rembg_session = self.models.get_model("rembg")
+        if rembg_session:
+            upd(0.1, "Background: Rembg subject extraction")
+            try:
+                # Rembg preferă RGBA sau RGB. Îi dăm BGR, ar trebui să se descurce.
+                # .remove returnează RGBA cu alpha=masca
+                out_rgba = rembg_session.remove(img_np_bgr)
+                if out_rgba.shape[2] == 4:
+                     logger.info("Using Rembg for background subject mask.")
+                     return out_rgba[:,:,3] # Returnăm canalul alpha ca mască a subiectului
+            except Exception as e: logger.warning(f"Rembg failed for background: {e}")
+
+        # Fallback la MediaPipe (dacă Rembg eșuează sau nu e disponibil)
+        mp_segmenter = self.models.get_model("mediapipe")
+        if mp_segmenter:
+             upd(0.1, "Background: MediaPipe subject segmentation")
+             try:
+                 img_rgb_mp = cv2.cvtColor(img_np_bgr, cv2.COLOR_BGR2RGB)
+                 res_mp = mp_segmenter.process(img_rgb_mp)
+                 mm = getattr(res_mp, 'segmentation_mask', None)
+                 if mm is not None:
+                      logger.info("Using MediaPipe for background subject mask.")
+                      # Convertim la 0-255
+                      return (mm > 0.5).astype(np.uint8) * 255
+             except Exception as e: logger.warning(f"MediaPipe failed for background: {e}")
+
+        # Fallback final la GrabCut (mai puțin precis, dar general)
+        logger.warning("Falling back to GrabCut for background subject mask.")
+        upd(0.1, "Background: GrabCut subject fallback")
+        raw_subj_mask = self._grabcut_subject(img_np_bgr)
         return raw_subj_mask # Returnează masca subiectului; inversarea se face în generate_mask
 
+
+    # --- Metoda Principală de Generare ---
     def generate_mask(
         self,
         image: Union[Image.Image, np.ndarray],
         prompt: str = "",
-        operation: Optional[Dict[str, Any]] = None, 
+        operation: Optional[Dict[str, Any]] = None,
+        image_context: Optional[Dict[str, Any]] = None, # NOU: Acceptă context
         progress_callback: Optional[Callable[[float, str], None]] = None
     ) -> Dict[str, Any]:
-        
-        operation = operation or {} 
+        """Generează masca optimă bazată pe prompt, operație și context."""
+        operation = operation or {}
+        start_time_mask = time.time()
 
-        def upd(pct: float, desc: str):
+        def upd(pct: float, desc: str): # Funcție internă de progres
             if progress_callback:
-                progress_callback(pct, desc)
-            logger.debug(f"MaskGen Progress: {pct*100:.0f}% - {desc}")
+                try: progress_callback(pct, desc)
+                except: pass # Ignorăm erorile din callback
+            logger.debug(f"MaskGen: {pct*100:.0f}% - {desc}")
 
-        # Standardize input image to BGR uint8 numpy array
-        img_np_bgr: Optional[np.ndarray] = None
-        if isinstance(image, Image.Image):
-            try:
-                img_pil = image.convert("RGB") # Asigurăm format RGB pentru PIL
-                img_np_bgr = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
-            except Exception as e_pil_conv:
-                logger.error(f"Error converting PIL Image to BGR NumPy: {e_pil_conv}", exc_info=True)
-                return {"mask": None, "raw_mask": None, "success": False, "message": "Image conversion error (PIL to NumPy)."}
-        elif isinstance(image, np.ndarray):
-            img_np_orig = image.copy()
-            if img_np_orig.ndim == 2: 
-                img_np_bgr = cv2.cvtColor(img_np_orig, cv2.COLOR_GRAY2BGR)
-            elif img_np_orig.shape[2] == 4: 
-                img_np_bgr = cv2.cvtColor(img_np_orig, cv2.COLOR_RGBA2BGR)
-            elif img_np_orig.shape[2] == 3: 
-                # Presupunem că e BGR dacă e NumPy cu 3 canale, deoarece OpenCV e sursa comună.
-                # Dacă ar fi RGB, _clipseg_segment oricum îl convertește la BGR intern pentru procesare,
-                # apoi înapoi la RGB pentru PIL. Aici, păstrăm BGR ca format intern principal.
-                img_np_bgr = img_np_orig 
-            else:
-                logger.error(f"Unsupported numpy image format: {img_np_orig.shape}")
-                return {"mask": None, "raw_mask": None, "success": False, "message": "Unsupported NumPy image format."}
-        else:
-            logger.error(f"Unsupported image type: {type(image)}")
-            return {"mask": None, "raw_mask": None, "success": False, "message": "Unsupported image type."}
-
-        if img_np_bgr.dtype != np.uint8:
-            logger.warning(f"Input image numpy array is not uint8 (type: {img_np_bgr.dtype}). Converting.")
-            if np.max(img_np_bgr) <= 1.0 and (img_np_bgr.dtype == np.float32 or img_np_bgr.dtype == np.float64):
-                 img_np_bgr = (img_np_bgr * 255).astype(np.uint8)
-            else: # Încercăm o conversie directă, cu riscuri
-                 try:
-                     img_np_bgr = np.clip(img_np_bgr, 0, 255).astype(np.uint8)
-                 except Exception as e_astype:
-                     logger.error(f"Failed to convert image to uint8: {e_astype}", exc_info=True)
-                     return {"mask": None, "raw_mask": None, "success": False, "message": "Image data type conversion error."}
-
-
+        # 1. Standardizare Input și Context
+        upd(0.0, "Preparing inputs...")
+        img_np_bgr = self._standardize_input_image(image)
+        if img_np_bgr is None: return {"success": False, "message": "Invalid input image."}
         h, w = img_np_bgr.shape[:2]
-        lprompt = prompt.lower()
-        
-        # Se presupune că `operation` este deja populat de `OperationAnalyzer`
-        # Dacă nu, logica de fallback din interiorul `_define_rules` sau `_get_clip_prompt_from_rule` va încerca să deducă.
-        logger.info(f"Generating mask for prompt: '{prompt}', pre-analyzed operation: {operation}")
 
-        raw_mask_generated = None 
-        final_message = "Mask generation failed or no specific rule matched."
-        applied_rule_name = "N/A"
+        # Obținem contextul dacă nu este furnizat
+        if image_context is None:
+            logger.info("Image context not provided, analyzing image...")
+            upd(0.02, "Analyzing image context...")
+            try:
+                 # Asigurăm PIL RGB pentru analizor
+                 img_pil_rgb = self._convert_cv2_to_pil(img_np_bgr)
+                 image_context = self.image_analyzer.analyze_image_context(img_pil_rgb)
+                 if "error" in image_context: image_context = {} # Folosim context gol dacă analiza eșuează
+            except Exception as e_ctx:
+                 logger.error(f"Failed to analyze image context internally: {e_ctx}")
+                 image_context = {} # Folosim context gol
+        else:
+             logger.debug("Using provided image context.")
 
+        # 2. Aplicare Reguli
+        raw_mask_generated = None; final_message = "No specific rule matched or strategy failed."; applied_rule_name = "N/A"
+        rule_matched = False
         for rule in self.rules:
-            if rule["condition"](prompt, operation):
-                applied_rule_name = rule['name']
-                logger.info(f"Applying rule: {applied_rule_name}")
+            # Pasăm și contextul la condiție
+            if rule["condition"](prompt, operation, image_context):
+                rule_matched = True
+                applied_rule_name = rule['name']; logger.info(f"Applying rule: {applied_rule_name}")
                 upd(0.05, f"Rule: {applied_rule_name}")
-                
-                strategy_params = rule.get("params", {})
-                strategy_params["_rule_name_"] = applied_rule_name
+                strategy_params = rule.get("params", {}); strategy_params["_rule_name_"] = applied_rule_name
+                # Pasăm și contextul la strategie
+                raw_mask_candidate = rule["strategy"](img_np_bgr, prompt, operation, image_context, strategy_params, upd)
 
-                raw_mask_candidate = rule["strategy"](img_np_bgr, prompt, operation, strategy_params, upd)
-                
                 if raw_mask_candidate is not None and raw_mask_candidate.size > 0 and raw_mask_candidate.shape[:2] == (h,w):
                     raw_mask_generated = raw_mask_candidate
-                    current_message = rule.get("message", "Mask generated by rule.")
-                    final_message = current_message(operation) if callable(current_message) else current_message
-                    
-                    if applied_rule_name == "Background Change/Remove":
-                        upd(0.4, "Morphology on subject (for background mask)")
-                        morphed_subj_mask = self._dynamic_morphology(raw_mask_generated, img_np_bgr)
-                        upd(0.7, "Edge refinement on subject (for background mask)")
-                        refined_subj_mask = self._advanced_edge_refine(morphed_subj_mask, img_np_bgr)
-                        final_processed_mask = cv2.bitwise_not(refined_subj_mask)
-                        raw_mask_to_return = refined_subj_mask 
-                        upd(1.0, "Background mask ready")
-                        return {"mask": final_processed_mask, "raw_mask": raw_mask_to_return, "success": True, "message": final_message}
-                    
-                    break 
-                else:
-                    logger.warning(f"Rule '{applied_rule_name}' executed but returned no mask, empty mask, or mismatched shape (expected ({h},{w}), got {raw_mask_candidate.shape if raw_mask_candidate is not None else 'None'}).")
-        
-        if raw_mask_generated is None:
-            logger.info("No specific rule matched or all matching rules failed. Falling back to hybrid strategy.")
-            applied_rule_name = "Hybrid Fallback" # Actualizăm numele regulii aplicate
-            upd(0.0, applied_rule_name)
-            
-            clip_prompt_hybrid = operation.get("target_object", "").strip()
-            if not clip_prompt_hybrid or clip_prompt_hybrid == "subject":
-                words = [w for w in lprompt.replace("remove","").replace("change","").replace("replace","").replace("add","").replace("make","").split() if w not in ["the","a","an","to","color","of","with","on","from","in","into", "style"]]
-                clip_prompt_hybrid = " ".join(words[:3]).strip() # Primele 3 cuvinte relevante
-            
-            if not clip_prompt_hybrid : clip_prompt_hybrid = "area of interest" # Un default mai bun
-            
-            raw_mask_generated = self._strategy_hybrid_fallback(img_np_bgr, clip_prompt_hybrid, upd)
-            final_message = f"Hybrid fallback mask for '{clip_prompt_hybrid}'." # Mesaj mai specific
-            if raw_mask_generated is None or raw_mask_generated.size == 0:
-                logger.error("Hybrid fallback mask generation also failed.")
-                return {"mask": np.zeros((h, w), np.uint8), "raw_mask": None, "success": False, "message": "All mask generation strategies failed."}
+                    msg_tpl = rule.get("message", "Mask generated by rule.")
+                    final_message = msg_tpl(operation) if callable(msg_tpl) else msg_tpl
 
-        logger.info(f"Performing final post-processing for rule: {applied_rule_name}")
+                    # Tratament special pentru background (inversare)
+                    if applied_rule_name == "Background (Inverted Subject)":
+                        upd(0.4, "Processing background mask...")
+                        morphed_subj = self._dynamic_morphology(raw_mask_generated, img_np_bgr)
+                        refined_subj = self._advanced_edge_refine(morphed_subj, img_np_bgr)
+                        final_processed_mask = cv2.bitwise_not(refined_subj)
+                        raw_mask_to_return = refined_subj # Returnăm masca subiectului ca raw
+                        upd(1.0, "Background mask ready")
+                        total_time = time.time() - start_time_mask
+                        logger.info(f"Mask generation time: {total_time:.2f}s (Rule: {applied_rule_name})")
+                        return {"mask": final_processed_mask, "raw_mask": raw_mask_to_return, "success": True, "message": final_message}
+                    break # Ieșim din for după prima regulă potrivită (non-background)
+                else:
+                    logger.warning(f"Rule '{applied_rule_name}' failed to produce a valid mask.")
+            # Continuăm la următoarea regulă dacă nu s-a potrivit condiția
+
+        # 3. Fallback Hibrid (dacă nicio regulă specifică nu a funcționat)
+        if not rule_matched or raw_mask_generated is None:
+             logger.info("No specific rule matched or rule failed. Falling back to hybrid strategy.")
+             applied_rule_name = "Hybrid Fallback"; upd(0.0, applied_rule_name)
+             # Folosim target_object sau un text extras din prompt pentru CLIPSeg în hibrid
+             clip_prompt_hybrid = operation.get("target_object", "").strip() or \
+                                  next((w for w in prompt.lower().split() if w not in ["remove","add","change","replace","make","the","a","an","to"]), "area")
+             raw_mask_generated = self._strategy_hybrid_fallback(img_np_bgr, clip_prompt_hybrid, image_context, upd)
+             final_message = f"Hybrid mask for '{clip_prompt_hybrid}'."
+             if raw_mask_generated is None:
+                  msg = "All mask generation strategies failed."; logger.error(msg)
+                  return {"mask": np.zeros((h, w), np.uint8), "raw_mask": None, "success": False, "message": msg}
+
+        # 4. Post-Procesare Finală (Morfologie + Rafinare Margini)
+        logger.info(f"Performing final post-processing (Rule: {applied_rule_name})")
         upd(0.65, "Final Morphology")
         morphed_mask = self._dynamic_morphology(raw_mask_generated, img_np_bgr)
         upd(0.85, "Final Edge Refinement")
         final_processed_mask = self._advanced_edge_refine(morphed_mask, img_np_bgr)
-        
+
         upd(1.0, "Mask ready")
+        total_time = time.time() - start_time_mask
+        logger.info(f"Mask generation time: {total_time:.2f}s (Rule: {applied_rule_name})")
         return {"mask": final_processed_mask, "raw_mask": raw_mask_generated, "success": True, "message": final_message}
 
-    def _strategy_hybrid_fallback(self, img_np_bgr: np.ndarray, clip_prompt_text: str, upd: Callable) -> Optional[np.ndarray]:
-        h, w = img_np_bgr.shape[:2]
-        accum = np.zeros((h, w), np.float32)
-        active_model_count = 0 # Număr de modele care au contribuit efectiv
 
-        upd(0.1, "Hybrid: GrabCut subject")
-        grabcut_subj = self._grabcut_subject(img_np_bgr)
-        if grabcut_subj is not None:
-            accum += grabcut_subj.astype(np.float32) / 255.0 * 0.8 # Ponderare
-            active_model_count += 1
-
-        yolo = self.models.get_model("yolo")
-        if yolo:
-            upd(0.25, "Hybrid: YOLO segmentation")
-            try:
-                preds = yolo.predict(source=img_np_bgr, stream=False, imgsz=640, conf=0.25, verbose=False)
-                yolo_masks_combined = np.zeros((h, w), np.float32)
-                yolo_detected_count = 0
-                for r in preds:
-                    if getattr(r, "masks", None) and hasattr(r.masks, "data") and r.masks.data.numel() > 0:
-                        masks_data = r.masks.data.cpu().numpy()
-                        for m_yolo in masks_data:
-                            if m_yolo.size == 0: continue
-                            m_resized = cv2.resize(m_yolo.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
-                            yolo_masks_combined += m_resized
-                            yolo_detected_count +=1
-                if yolo_detected_count > 0:
-                    accum += (yolo_masks_combined / yolo_detected_count) * 1.0 # Ponderare
-                    active_model_count += 1 
-            except Exception as e: logger.error(f"Hybrid YOLO error: {e}", exc_info=True)
-
-        if any(k in clip_prompt_text.lower() for k in ["person", "face", "selfie", "man", "woman", "boy", "girl", "human"]):
-            mp_segmenter = self.models.get_model("mediapipe") 
-            if mp_segmenter:
-                upd(0.5, "Hybrid: MediaPipe segmentation")
-                try:
-                    img_rgb_for_mp = cv2.cvtColor(img_np_bgr, cv2.COLOR_BGR2RGB)
-                    res_mp = mp_segmenter.process(img_rgb_for_mp)
-                    mm = getattr(res_mp, 'segmentation_mask', None)
-                    if mm is not None and mm.size > 0:
-                        mmf = cv2.resize(mm.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
-                        accum += mmf * 1.2 # Ponderare
-                        active_model_count += 1
-                except Exception as e: logger.error(f"Hybrid MediaPipe error: {e}", exc_info=True)
-        
-        upd(0.75, f"Hybrid: CLIPSeg for '{clip_prompt_text}'")
-        clip_gen_seg = self._clipseg_segment(img_np_bgr, clip_prompt_text)
-        if clip_gen_seg is not None:
-            accum += clip_gen_seg.astype(np.float32) / 255.0 * 1.5 # Ponderare
-            active_model_count += 1
-        
-        if active_model_count == 0: # Schimbat din count în active_model_count
-            logger.warning("Hybrid fallback: No models contributed effectively. Returning a blank mask.")
-            return np.zeros((h,w), dtype=np.uint8)
-
-        # Normalizăm prin numărul de modele care au contribuit efectiv
-        combined_float_mask = np.clip(accum / active_model_count, 0.0, 1.0) 
-        hybrid_threshold_val = self.config.get("HYBRID_MASK_THRESHOLD", 0.35)
-        final_hybrid_mask = (combined_float_mask > hybrid_threshold_val).astype(np.uint8) * 255
-        return final_hybrid_mask
+    # --- Metode Helper pentru Strategii Specifice ---
 
     def _grabcut_subject(self, img_bgr_np: np.ndarray, rect_inset_ratio: float = 0.05) -> Optional[np.ndarray]:
-        h, w = img_bgr_np.shape[:2]
-        if h == 0 or w == 0: logger.error("GrabCut received an empty image."); return None
-        if img_bgr_np.ndim < 3 or img_bgr_np.shape[2] < 3:
-            logger.error(f"GrabCut expects a 3-channel BGR image, got {img_bgr_np.shape}."); return None
-
-        mask_gc = np.zeros((h, w), np.uint8)
-        bgd_model, fgd_model = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
-        
-        dx, dy = int(rect_inset_ratio * w), int(rect_inset_ratio * h) 
-        rect_w, rect_h = w - 2*dx, h - 2*dy
-        rect = (max(1, dx), max(1, dy), max(1, rect_w), max(1, rect_h)) # Asigură valori pozitive
-        if rect[2] <= 0 or rect[3] <= 0: logger.error("Image too small for GrabCut rect."); return None
-
+        """Rulează GrabCut pentru a extrage subiectul central."""
+        # (Cod neschimbat, dar verificările de input sunt acum în generate_mask)
+        h, w = img_bgr_np.shape[:2]; mask_gc = np.zeros((h, w), np.uint8)
+        bgd, fgd = np.zeros((1, 65), np.float64), np.zeros((1, 65), np.float64)
+        dx, dy = int(rect_inset_ratio * w), int(rect_inset_ratio * h)
+        rect = (max(1, dx), max(1, dy), max(1, w - 2*dx), max(1, h - 2*dy))
+        if rect[2] <= 0 or rect[3] <= 0: return None # Imagine prea mică
         try:
-            cv2.grabCut(img_bgr_np, mask_gc, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
+            cv2.grabCut(img_bgr_np, mask_gc, rect, bgd, fgd, 5, cv2.GC_INIT_WITH_RECT)
             return np.where((mask_gc == cv2.GC_FGD) | (mask_gc == cv2.GC_PR_FGD), 255, 0).astype(np.uint8)
-        except Exception as e:
-            logger.error(f"GrabCut error: {e}", exc_info=True)
-            fb_mask = np.zeros((h, w), np.uint8)
-            try: cv2.rectangle(fb_mask, (rect[0], rect[1]), (rect[0] + rect[2], rect[1] + rect[3]), 255, -1)
-            except: pass
-            return fb_mask
+        except Exception as e: logger.error(f"GrabCut error: {e}"); return None
+
 
     def _clipseg_segment(self, img_bgr_np: np.ndarray, text_prompt: str) -> Optional[np.ndarray]:
-        """Rulează CLIPSeg. Input: BGR NumPy. Output: uint8 mask [0–255]."""
-        bundle = self.models.get_model("clipseg")
-        if not bundle or "processor" not in bundle or "model" not in bundle:
-            logger.warning("CLIPSeg model/processor not in ModelManager.")
-            return None
+        """Rulează CLIPSeg. Returnează masca uint8 (0-255)."""
+        # (Cod neschimbat, dar verificările modelului sunt acum în get_model)
+        bundle = self.models.get_model("clipseg"); # Folosim get_model pentru lazy loading
+        if not bundle or not bundle.get('processor') or not bundle.get('model'): logger.warning("CLIPSeg model/processor not loaded."); return None
         processor, model = bundle["processor"], bundle["model"]
         try:
-            img_rgb_np = cv2.cvtColor(img_bgr_np, cv2.COLOR_BGR2RGB)
-            pil_image = Image.fromarray(img_rgb_np)
-        except Exception as e_pil:
-            logger.error(f"PIL conversion error for CLIPSeg: {e_pil}", exc_info=True); return None
-            
-        effective_text = text_prompt.strip() if text_prompt and text_prompt.strip() else "object"
-        logger.debug(f"CLIPSeg with text: '{effective_text}'")
-        try:
-            inputs = processor(text=[effective_text], images=[pil_image], return_tensors="pt", padding="max_length", truncation=True) # Adăugat max_length și truncation
-        except Exception as e_proc:
-            logger.error(f"CLIPSeg processor error ('{effective_text}'): {e_proc}", exc_info=True); return None
-        processed_inputs = {}
-        try:
-            target_device = model.device
-            target_dtype = model.dtype if hasattr(model, 'dtype') and model.dtype is not None else torch.float32
-            for k, v_tensor in inputs.items():
-                processed_inputs[k] = v_tensor.to(target_device, dtype=target_dtype if v_tensor.dtype.is_floating_point else v_tensor.dtype)
-        except Exception as e_device:
-            logger.error(f"Device move error for CLIPSeg ('{effective_text}'): {e_device}", exc_info=True); return None
-        try:
-            with torch.no_grad(): outputs = model(**processed_inputs)
-            logits = outputs.logits if hasattr(outputs, 'logits') else outputs[0]
-            if logits.ndim == 4: logits = logits.squeeze(0).squeeze(0) 
-            elif logits.ndim == 3: logits = logits.squeeze(0)
-            if logits.ndim != 2: logger.error(f"CLIPSeg logits ndim {logits.ndim} for '{effective_text}'. Shape: {logits.shape}"); return None
-            probs = torch.sigmoid(logits).cpu().numpy().astype(np.float32)
-            if probs.size == 0 or probs.shape[0] == 0 or probs.shape[1] == 0: logger.error(f"CLIPSeg 'probs' empty for '{effective_text}'."); return None
+            pil_image = self._convert_cv2_to_pil(img_bgr_np) # Helper pentru conversie sigură
+            effective_text = text_prompt.strip() if text_prompt else "object"
+            inputs = processor(text=[effective_text], images=[pil_image], return_tensors="pt", padding=True, truncation=True).to(model.device) # Padding/Truncation importante
+            with torch.no_grad(): outputs = model(**inputs)
+            logits = outputs.logits; # Dimensiuni [1, 1, H_out, W_out] sau [1, H_out, W_out]
+            # Redimensionăm logits la dimensiunea imaginii originale *înainte* de sigmoid/thresholding
             target_h, target_w = img_bgr_np.shape[:2]
-            mask_resized_float = cv2.resize(probs, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
-            return (np.clip(mask_resized_float, 0.0, 1.0) * 255).astype(np.uint8)
-        except Exception as e_runtime:
-            logger.error(f"Runtime/Resize error in CLIPSeg ('{effective_text}'): {e_runtime}", exc_info=True); return None
+            logits_resized = F.interpolate(logits.unsqueeze(0), size=(target_h, target_w), mode='bilinear', align_corners=False).squeeze() # [H, W]
+            probs = torch.sigmoid(logits_resized).cpu().numpy() # float32 0-1
+            return (probs * 255).astype(np.uint8) # Returnăm heatmap-ul uint8
+        except Exception as e: logger.error(f"CLIPSeg processing error ('{effective_text}'): {e}", exc_info=True); return None
 
-    def _morphology(self, mask: np.ndarray, close_k:int, open_k:int, close_iter:int, open_iter:int) -> np.ndarray:
-        if mask is None or mask.size == 0: return mask
-        if close_k <= 0 or open_k <=0: return mask
-        close_k = close_k if close_k % 2 != 0 else close_k + 1
-        open_k = open_k if open_k % 2 != 0 else open_k + 1
+    # NOU: Metodă pentru a rula SAM cu bounding box
+    def _sam_segment_box(self, img_rgb_np: np.ndarray, bbox_xyxy: np.ndarray) -> Optional[np.ndarray]:
+        """Rulează SAM predictor folosind un bounding box."""
+        sam_predictor = self.models.get_model("sam_predictor")
+        if not sam_predictor: logger.warning("SAM Predictor not loaded."); return None
+        if img_rgb_np.ndim != 3 or img_rgb_np.shape[2] != 3: logger.error("SAM requires RGB NumPy image."); return None
+
         try:
-            ker_close = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_k, close_k))
-            ker_open = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_k, open_k))
-            m = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, ker_close, iterations=close_iter)
-            m = cv2.morphologyEx(m, cv2.MORPH_OPEN, ker_open, iterations=open_iter)
+             # 1. Setează imaginea în predictor (trebuie făcut o singură dată per imagine)
+             # Ideal, ar trebui să verificăm dacă imaginea s-a schimbat de la ultimul apel.
+             # Pentru simplitate, o setăm de fiecare dată.
+             start_set = time.time()
+             sam_predictor.set_image(img_rgb_np)
+             logger.debug(f"SAM set_image took: {time.time() - start_set:.3f}s")
+
+             # 2. Rulează predicția cu bounding box
+             start_pred = time.time()
+             masks, scores, _ = sam_predictor.predict(
+                 point_coords=None, # Nu folosim puncte
+                 point_labels=None,
+                 box=bbox_xyxy[None, :], # Adăugăm dimensiune batch [1, 4]
+                 multimask_output=False, # Cerem o singură mască (cea mai bună)
+             )
+             logger.debug(f"SAM predict (box) took: {time.time() - start_pred:.3f}s")
+
+             # masks este [1, H, W] boolean, scores este [1]
+             if masks.shape[0] > 0:
+                  # Returnăm prima (și singura) mască ca uint8 (0 sau 255)
+                  best_mask = (masks[0] * 255).astype(np.uint8)
+                  logger.debug(f"SAM mask generated from box, score: {scores[0]:.3f}")
+                  return best_mask
+             else:
+                  logger.warning("SAM predict with box returned no masks.")
+                  return None
+
+        except Exception as e:
+            logger.error(f"SAM segmentation with box error: {e}", exc_info=True)
+            return None
+
+    # --- Strategie Hibridă (Adaptată să poată folosi SAM) ---
+    def _strategy_hybrid_fallback(self, img_np_bgr: np.ndarray, clip_prompt_text: str,
+                                   image_context: Optional[Dict[str, Any]], upd: Callable) -> Optional[np.ndarray]:
+        """Strategie fallback care combină mai multe metode, inclusiv SAM dacă e posibil."""
+        h, w = img_np_bgr.shape[:2]
+        accum = np.zeros((h, w), np.float32)
+        contrib_count = 0; weights_sum = 0.0
+
+        def add_contribution(mask_np, weight):
+             nonlocal accum, contrib_count, weights_sum
+             if mask_np is not None and mask_np.shape[:2] == (h,w):
+                  # Normalizăm masca la 0-1 float
+                  if mask_np.dtype == np.uint8: mask_float = mask_np.astype(np.float32) / 255.0
+                  elif np.max(mask_np) > 1.0: mask_float = np.clip(mask_np, 0, 255).astype(np.float32) / 255.0
+                  else: mask_float = mask_np.astype(np.float32)
+                  accum += mask_float * weight
+                  contrib_count += 1
+                  weights_sum += weight
+                  return True
+             return False
+
+        # 1. Încercăm SAM + YOLO pentru obiectul din promptul CLIP (dacă avem context)
+        if image_context:
+            upd(0.1, f"Hybrid: Try SAM+YOLO for '{clip_prompt_text}'")
+            yolo_labels = [clip_prompt_text] # Căutăm obiectul specific
+            # Simulăm o operație și o regulă pentru a apela _strategy_sam_yolo
+            sam_yolo_op = {"target_object": clip_prompt_text}
+            sam_yolo_params = {"yolo_labels": yolo_labels}
+            sam_mask = self._strategy_sam_yolo(img_np_bgr, "", sam_yolo_op, image_context, sam_yolo_params, lambda p,d: upd(0.1+p*0.2, d))
+            if add_contribution(sam_mask, 2.0): logger.debug("Hybrid: SAM+YOLO contributed.") # Ponderare mare pentru SAM
+
+        # 2. CLIPSeg (dacă SAM nu a contribuit sau ca sursă suplimentară)
+        upd(0.35, f"Hybrid: CLIPSeg for '{clip_prompt_text}'")
+        clip_seg_mask = self._clipseg_segment(img_np_bgr, clip_prompt_text)
+        if add_contribution(clip_seg_mask, 1.0): logger.debug("Hybrid: CLIPSeg contributed.")
+
+        # 3. YOLO (dacă e disponibil și găsește ceva relevant)
+        if image_context and clip_prompt_text != "person": # Evităm rularea YOLO din nou dacă am rulat pt SAM
+             yolo_model = self._get_object_detector()
+             if yolo_model:
+                  upd(0.6, "Hybrid: YOLO detection/segmentation")
+                  yolo_mask = self._get_yolo_mask_for_prompt(yolo_model, img_np_bgr, clip_prompt_text)
+                  if add_contribution(yolo_mask, 0.8): logger.debug("Hybrid: YOLO contributed.")
+
+        # 4. GrabCut (ca bază generală)
+        upd(0.8, "Hybrid: GrabCut subject")
+        grabcut_mask = self._grabcut_subject(img_np_bgr)
+        if add_contribution(grabcut_mask, 0.5): logger.debug("Hybrid: GrabCut contributed.")
+
+        if contrib_count == 0: logger.warning("Hybrid fallback: No models contributed."); return None
+
+        # Normalizare și Thresholding
+        # Normalizăm prin suma ponderilor pentru a nu depăși 1.0
+        final_float_mask = np.clip(accum / weights_sum if weights_sum > 0 else accum, 0.0, 1.0)
+        thresh = self.config.get("HYBRID_MASK_THRESHOLD", 0.4) if self.config else 0.4 # Prag mai mare pentru hibrid
+        final_mask = (final_float_mask > thresh).astype(np.uint8) * 255
+        logger.debug(f"Hybrid mask generated using {contrib_count} sources.")
+        return final_mask
+
+    def _get_yolo_mask_for_prompt(self, yolo_model, img_np_bgr, prompt_text) -> Optional[np.ndarray]:
+         """Rulează YOLO și returnează masca combinată pentru obiectele care se potrivesc cu promptul."""
+         try:
+              h, w = img_np_bgr.shape[:2]
+              results = yolo_model.predict(source=img_np_bgr, stream=False, conf=0.3, verbose=False) # Conf mai mic aici
+              combined_mask = np.zeros((h, w), dtype=np.uint8)
+              count = 0
+              if results and isinstance(results, list):
+                   res = results[0]
+                   if hasattr(res, 'boxes') and res.boxes is not None and hasattr(res, 'masks') and res.masks is not None:
+                        boxes_data = res.boxes.data.cpu().numpy() # xyxy, conf, cls
+                        masks_data = res.masks.data.cpu().numpy() # [N, H, W]
+                        class_names = getattr(res, 'names', {})
+                        for i, box in enumerate(boxes_data):
+                             cls_id = int(box[5]); label = class_names.get(cls_id, '')
+                             # Verificare simplă dacă label-ul apare în prompt
+                             if label and label in prompt_text:
+                                  if i < len(masks_data):
+                                       mask_i = cv2.resize(masks_data[i], (w, h), interpolation=cv2.INTER_NEAREST)
+                                       combined_mask = np.maximum(combined_mask, (mask_i > 0.5).astype(np.uint8) * 255)
+                                       count += 1
+              logger.debug(f"YOLO found {count} mask(s) matching '{prompt_text}' for hybrid strategy.")
+              return combined_mask if count > 0 else None
+         except Exception as e: logger.error(f"YOLO mask extraction for prompt failed: {e}"); return None
+
+
+    # --- Metode de Post-Procesare Mască (neschimbate) ---
+    def _morphology(self, mask: np.ndarray, close_k:int, open_k:int, close_iter:int, open_iter:int) -> np.ndarray:
+        # (Cod neschimbat)
+        if mask is None or mask.size == 0 or close_k<=0 or open_k<=0: return mask
+        close_k+=1 if close_k%2==0 else 0; open_k+=1 if open_k%2==0 else 0
+        try:
+            k_close=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(close_k,close_k))
+            k_open=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(open_k,open_k))
+            m = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k_close, iterations=close_iter)
+            m = cv2.morphologyEx(m, cv2.MORPH_OPEN, k_open, iterations=open_iter)
             return m
-        except Exception as e_morph:
-            logger.error(f"Morphology error: {e_morph}", exc_info=True); return mask
+        except Exception as e: logger.error(f"Morphology error: {e}"); return mask
 
     def _dynamic_morphology(self, mask: np.ndarray, img: np.ndarray) -> np.ndarray:
-        if mask is None or img is None or img.size == 0: return mask
-        h, w = img.shape[:2]; min_dim = min(h,w)
-        close_k = max(3, int((0.015 if min_dim > 1000 else 0.01) * min_dim) // 2 * 2 + 1) 
-        open_k = max(3, int((0.007 if min_dim > 1000 else 0.005) * min_dim) // 2 * 2 + 1)
-        close_iter = 3 if min_dim > 700 else 2; open_iter = 2 if min_dim > 700 else 1
-        logger.debug(f"Dynamic morphology: close_k={close_k}, open_k={open_k}, iters={close_iter},{open_iter}")
-        return self._morphology(mask, close_k, open_k, close_iter, open_iter)
+        # (Cod neschimbat)
+        if mask is None or img is None: return mask; h, w = img.shape[:2]; min_d = min(h,w)
+        close_k=max(3,int((0.015 if min_d>1000 else 0.01)*min_d)//2*2+1)
+        open_k=max(3,int((0.007 if min_d>1000 else 0.005)*min_d)//2*2+1)
+        close_i=3 if min_d>700 else 2; open_i=2 if min_d>700 else 1
+        logger.debug(f"Dynamic morphology: close={close_k}x{close_i}, open={open_k}x{open_i}")
+        return self._morphology(mask, close_k, open_k, close_i, open_i)
 
     def _advanced_edge_refine(self, mask: np.ndarray, img_bgr: np.ndarray) -> np.ndarray:
-        if mask is None or img_bgr is None or img_bgr.size == 0: return mask
+        # (Cod neschimbat)
+        if mask is None or img_bgr is None: return mask
         try:
-            if not hasattr(cv2, 'ximgproc') or not hasattr(cv2.ximgproc, 'guidedFilter'):
-                return self._edge_refine(mask, img_bgr)
+            if not hasattr(cv2, 'ximgproc') or not hasattr(cv2.ximgproc, 'guidedFilter'): return self._edge_refine(mask, img_bgr)
         except AttributeError: return self._edge_refine(mask, img_bgr)
         try:
-            mask_float = mask.astype(np.float32) / 255.0
-            gray_img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-            edges_canny = cv2.Canny(gray_img, 30, 100).astype(np.float32) / 255.0
-            grad_x = cv2.Sobel(gray_img, cv2.CV_32F, 1, 0, ksize=3); grad_y = cv2.Sobel(gray_img, cv2.CV_32F, 0, 1, ksize=3)
-            edges_sobel_mag = cv2.magnitude(grad_x, grad_y)
-            max_s = np.max(edges_sobel_mag); edges_sobel = edges_sobel_mag/max_s if max_s > 0 else np.zeros_like(edges_sobel_mag, dtype=np.float32)
-            combined_edges = np.maximum(edges_canny, edges_sobel)
-            edge_influence = 0.3 # Ajustat
-            # Blend mai atent: întărește masca unde e puternică și nu sunt muchii, și vice-versa
-            blended_float = mask_float * (1.0 - combined_edges * edge_influence) + \
-                            combined_edges * (mask_float * 0.2 + 0.1) # Adaugă o componentă mică de muchie
-            blended_float = np.clip(blended_float, 0.0, 1.0)
-
-            radius = max(3, int(0.005 * min(img_bgr.shape[:2]))) 
-            eps_val = 0.005 
-            guide_img = img_bgr # Guided filter se așteaptă la BGR dacă src e monocrom
-            
-            blended_u8_for_guide = (blended_float * 255).astype(np.uint8)
-            # Asigurăm că src pentru guidedFilter este monocrom
-            if blended_u8_for_guide.ndim == 3: blended_u8_for_guide = cv2.cvtColor(blended_u8_for_guide, cv2.COLOR_BGR2GRAY)
-
-            filtered_mask = cv2.ximgproc.guidedFilter(guide=guide_img, src=blended_u8_for_guide, radius=radius, eps=eps_val*eps_val*255*255) 
-            if filtered_mask.dtype != np.uint8: filtered_mask = np.clip(filtered_mask, 0, 255).astype(np.uint8)
-            _, thresholded_mask = cv2.threshold(filtered_mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            k_size = 3 # Kernel mai mic pentru curățare fină
-            kernel_final_clean = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
-            cleaned_mask = cv2.morphologyEx(thresholded_mask, cv2.MORPH_OPEN, kernel_final_clean, iterations=1)
-            cleaned_mask = cv2.morphologyEx(cleaned_mask, cv2.MORPH_CLOSE, kernel_final_clean, iterations=1) # O singură închidere
-            return cleaned_mask
-        except Exception as e_adv:
-            logger.error(f"Advanced edge refine error: {e_adv}. Falling back.", exc_info=True)
-            return self._edge_refine(mask, img_bgr) 
+            mask_f=mask.astype(np.float32)/255.0; gray=cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+            edges_c=cv2.Canny(gray,30,100).astype(np.float32)/255.0
+            gx=cv2.Sobel(gray,cv2.CV_32F,1,0,ksize=3); gy=cv2.Sobel(gray,cv2.CV_32F,0,1,ksize=3)
+            edges_s_mag=cv2.magnitude(gx,gy); max_s=np.max(edges_s_mag); edges_s=edges_s_mag/max_s if max_s>0 else np.zeros_like(edges_s_mag)
+            edges=np.maximum(edges_c,edges_s); influence=0.3
+            blend_f=mask_f*(1.0-edges*influence)+edges*(mask_f*0.2+0.1); blend_f=np.clip(blend_f,0.0,1.0)
+            radius=max(3,int(0.005*min(img_bgr.shape[:2]))); eps=0.005
+            blend_u8= (blend_f*255).astype(np.uint8)
+            filtered = cv2.ximgproc.guidedFilter(guide=img_bgr, src=blend_u8, radius=radius, eps=eps*eps*255*255)
+            if filtered.dtype!=np.uint8: filtered=np.clip(filtered,0,255).astype(np.uint8)
+            _,thresh=cv2.threshold(filtered,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
+            k=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3))
+            clean=cv2.morphologyEx(thresh,cv2.MORPH_OPEN,k,iterations=1); clean=cv2.morphologyEx(clean,cv2.MORPH_CLOSE,k,iterations=1)
+            return clean
+        except Exception as e: logger.error(f"Advanced edge refine error: {e}. Fallback.",exc_info=True); return self._edge_refine(mask, img_bgr)
 
     def _edge_refine(self, mask: np.ndarray, img: np.ndarray) -> np.ndarray: # Fallback
-        if mask is None or img is None or img.size == 0: return mask
+        # (Cod neschimbat)
+        if mask is None or img is None: return mask
         try:
-            kernel_size = max(3, int(0.005 * min(img.shape[:2])) // 2 * 2 + 1)
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-            opened_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
-            closed_mask = cv2.morphologyEx(opened_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-            return closed_mask
-        except Exception as e_basic:
-            logger.error(f"Basic edge refine error: {e_basic}", exc_info=True); return mask
-    
-    def _adaptive_threshold(self, mask_channel: np.ndarray, img: np.ndarray) -> np.ndarray:
-        if mask_channel is None or img is None or img.size == 0: return mask_channel if mask_channel is not None else np.array([], dtype=np.uint8)
-        if mask_channel.dtype != np.uint8: mask_channel = np.clip(mask_channel, 0, 255).astype(np.uint8)
-        if mask_channel.ndim != 2:
-            if mask_channel.ndim == 3 and mask_channel.shape[2] == 1: mask_channel = mask_channel.squeeze(axis=2)
-            else: _, th_mask = cv2.threshold(mask_channel, 127, 255, cv2.THRESH_BINARY); return th_mask
-        if mask_channel.size == 0: return np.array([], dtype=np.uint8)
-        block_size = min(31, max(3, int(0.05 * min(img.shape[:2])) // 2 * 2 + 1)) 
-        C_val = 2 
-        try: return cv2.adaptiveThreshold(mask_channel, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, block_size, C_val)
-        except: _, th_mask = cv2.threshold(mask_channel, 127, 255, cv2.THRESH_BINARY); return th_mask
+            k_size=max(3,int(0.005*min(img.shape[:2]))//2*2+1); k=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(k_size,k_size))
+            m=cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1); m=cv2.morphologyEx(m, cv2.MORPH_CLOSE, k, iterations=1); return m
+        except Exception as e: logger.error(f"Basic edge refine error: {e}"); return mask
 
+    # --- Helpers de Conversie ---
+    def _standardize_input_image(self, image: Union[Image.Image, np.ndarray]) -> Optional[np.ndarray]:
+         """Convertește inputul la BGR NumPy uint8."""
+         try: # Copiem helper-ul din BasePipeline pentru independență
+            if isinstance(image, np.ndarray):
+                if image.ndim == 2: return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+                elif image.shape[2] == 4: return cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+                elif image.shape[2] == 3: return image.astype(np.uint8) if image.dtype!=np.uint8 else image
+                else: raise ValueError(f"Unsupported NumPy shape: {image.shape}")
+            elif isinstance(image, Image.Image):
+                img_rgb = image.convert("RGB"); return cv2.cvtColor(np.array(img_rgb), cv2.COLOR_RGB2BGR)
+            else: raise TypeError(f"Unsupported type: {type(image)}")
+         except Exception as e: logger.error(f"Image standardization error: {e}"); return None
+
+    def _convert_cv2_to_pil(self, img_np):
+        """Convertește BGR NumPy în PIL RGB."""
+        if img_np is None: return None
+        try: return Image.fromarray(cv2.cvtColor(img_np, cv2.COLOR_BGR2RGB))
+        except Exception as e: logger.error(f"CV2 to PIL conversion failed: {e}"); return None
