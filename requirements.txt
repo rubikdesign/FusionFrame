@@ -1,28 +1,38 @@
-# PyTorch, torchvision, torchaudio vor fi instalate prin install.sh cu versiuni specifice CUDA
-# flash-attn, xformers, diffusers, transformers, ultralytics vor fi instalate/actualizate prin install.sh
+# Requirements pentru FusionFrame 2.0 cu CUDA 12 (compatibilitate testată)
+# PyTorch, torchvision, torchaudio vor fi instalate separat în script-ul de instalare
 
 # Dependențe de bază
-numpy==1.24.3
-opencv-python-headless==4.8.0.74 # Considerați actualizarea la o versiune mai nouă dacă apar probleme de compatibilitate cu noul PyTorch/NumPy
-pillow==10.0.0 # Considerați actualizarea la Pillow >=10.1.0 dacă apar probleme
-gradio>=4.44.1 # Păstrăm versiunea minimă
-scikit-image==0.21.0 # Considerați actualizarea
-requests==2.31.0 # Considerați actualizarea
-tqdm==4.65.0 # Considerați actualizarea
-psutil==5.9.5
+numpy==1.26.4
+opencv-python-headless==4.9.0.80
+pillow==10.2.0
+gradio==4.44.1
+scikit-image==0.22.0
+requests==2.31.0
+tqdm==4.66.2
+psutil==5.9.8
 
-# Accelerate, safetensors, huggingface_hub sunt adesea dependințe ale transformers/diffusers
-# și vor fi actualizate la versiuni compatibile.
-# accelerate==0.25.0 # Se va actualiza ca dependență
-# safetensors==0.4.0 # Se va actualiza ca dependență
-# huggingface_hub>=0.19.4 # Se va actualiza ca dependență
+# Dependențe pentru HiDream și diffusers
+accelerate==0.30.1
+transformers==4.38.2
+safetensors==0.4.2
+huggingface_hub>=0.20.2
+# diffusers se va instala din sursă în install.sh: 
+# pip install git+https://github.com/huggingface/diffusers.git
+compel==2.0.2
+
+# Dependențe pentru procesare imagine și GPU
+bitsandbytes==0.43.0
+xformers==0.0.24
+flash-attn==2.5.6
 
 # Modele de segmentare și unelte specializate
-mediapipe==0.10.5 # Considerați actualizarea la cea mai recentă versiune (ex: 0.10.11+)
+mediapipe==0.10.11
 segment-anything==1.0
-# ultralytics va fi actualizat de install.sh
-rembg==2.0.50 # Considerați actualizarea
-# xformers va fi actualizat de install.sh
-bitsandbytes==0.41.1 # Asigurați-vă că această versiune este compatibilă cu PyTorch 2.7+; poate necesita actualizare.
-huggingface_hub[hf_xet] # Păstrează extra-urile pentru hf_xet
+ultralytics==8.1.17
+rembg==2.0.53
 
+# Utilități pentru dezvoltare
+protobuf>=4.25.1
+packaging>=23.2
+typing_extensions>=4.9.0
+pyyaml>=6.0.1
