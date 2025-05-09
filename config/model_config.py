@@ -9,7 +9,7 @@ class ModelConfig:
     """Centralized configuration for AI models and their parameters."""
 
     # --- Main and Backup Models ---
-    MAIN_MODEL_NAME = "HiDream-I1-Full"
+    MAIN_MODEL = "HiDream-I1-Full"
     BACKUP_MODEL_NAME = "HiDream-I1-Fast"
 
     # --- Detailed Configurations for Specific Models ---

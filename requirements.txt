@@ -5,11 +5,12 @@
 numpy==1.26.4
 opencv-python-headless==4.9.0.80
 pillow==10.2.0
-gradio==4.44.1
+gradio=4.19.0
 scikit-image==0.22.0
 requests==2.31.0
 tqdm==4.66.2
 psutil==5.9.8
+sentencepiece
 
 # Dependențe pentru HiDream și diffusers
 accelerate==0.30.1

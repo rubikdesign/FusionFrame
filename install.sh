@@ -232,6 +232,7 @@ fi
 
 echo "Pornesc aplicația FusionFrame..."
 # Punctul de intrare al aplicației Gradio
+
 python interface/ui.py "$@"
 
 EOL
@@ -435,7 +436,7 @@ export CUDA_VISIBLE_DEVICES=0
 export BNB_CUDA_VERSION=120
 export FLASH_ATTENTION_SKIP_CUDA_BUILD=1
 export XFORMERS_FORCE_DISABLE_TRITON=1
-
+export TRANSFORMERS_OFFLINE=0  
 # Scriem un mic test pentru bitsandbytes
 log "Creez test pentru bitsandbytes..."
 cat > test_bnb.py << 'EOL'
