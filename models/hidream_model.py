@@ -2,10 +2,8 @@
 # -*- coding: utf-8 -*-
 
 """
-Implementation for HiDream model in FusionFrame 2.0 (Corrected Version)
-
-Note: HiDream models require a recent version of diffusers installed from source:
-pip install git+https://github.com/huggingface/diffusers.git
+Implementation for HiDream model in FusionFrame 2.0 (Optimized Version)
+- Cu offloading dezactivat pentru a evita blocajele
 """
 
 import os
@@ -14,6 +12,7 @@ import logging
 from typing import Dict, Any, Optional, List, Union
 from PIL import Image
 import numpy as np
+import gc
 
 from config.app_config import AppConfig
 from config.model_config import ModelConfig
@@ -49,6 +48,8 @@ class HiDreamModel(BaseModel):
         use_refiner: Optional[bool] = None,
     ):
         super().__init__(model_id, device)
+        # Adăugare text românesc pentru logging
+        logger.info(f"Inițializare model HiDream {model_id}")
         # Explicitly add is_loaded to prevent attribute errors
         self.is_loaded = False
         
@@ -70,6 +71,29 @@ class HiDreamModel(BaseModel):
         logger.info(f"Loading HiDream model '{self.model_id}' with refiner={self.use_refiner}")
         PipelineClass = DiffusionPipeline # Initialize with fallback
 
+        # Adăugare cod pentru RMSNorm custom
+        try:
+            # RMSNorm necesar pentru modelele HiDream
+            if not hasattr(torch.nn, "RMSNorm"):
+                class RMSNorm(torch.nn.Module):
+                    def __init__(self, dim: int, eps: float = 1e-6):
+                        super().__init__()
+                        self.eps = eps
+                        self.weight = torch.nn.Parameter(torch.ones(dim))
+
+                    def _norm(self, x):
+                        return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
+
+                    def forward(self, x):
+                        output = self._norm(x.float()).type_as(x)
+                        return output * self.weight
+                
+                # Adaugă RMSNorm în torch.nn pentru a fi găsit de model
+                torch.nn.RMSNorm = RMSNorm
+                logger.info("Adăugat RMSNorm personalizat în torch.nn")
+        except Exception as e_norm:
+            logger.warning(f"Nu s-a putut adăuga RMSNorm: {e_norm}")
+
         try:
             # Try to import specific HiDream class
             from diffusers.pipelines.hidream_image.pipeline_hidream_image import HiDreamImagePipeline
@@ -90,6 +114,11 @@ class HiDreamModel(BaseModel):
                  self.is_loaded = False
                  return False
 
+        # Eliberează memoria GPU pentru a face loc pentru noul model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+            logger.info(f"CUDA memory after cleanup: {torch.cuda.memory_allocated(self.device) / 1024**3:.2f} GB used, {torch.cuda.memory_reserved(self.device) / 1024**3:.2f} GB reserved")
 
         try:
             # 1. Load VAE
@@ -101,7 +130,7 @@ class HiDreamModel(BaseModel):
             ).to(self.device)
             logger.info("VAE loaded successfully.")
 
-            # 2. Load ControlNet if configured
+            # 2. Load ControlNet if configured (OPȚIONAL - dezactivează dacă ai probleme)
             if ModelConfig.CONTROLNET_CONFIG and ModelConfig.CONTROLNET_CONFIG.get("model_id"):
                 logger.info(f"Loading ControlNet from {ModelConfig.CONTROLNET_CONFIG['model_id']}...")
                 try:
@@ -109,7 +138,6 @@ class HiDreamModel(BaseModel):
                         ModelConfig.CONTROLNET_CONFIG["model_id"],
                         torch_dtype=AppConfig.DTYPE,
                         use_safetensors=True,
-                        variant="fp16" if AppConfig.DTYPE == torch.float16 else None,
                         cache_dir=AppConfig.CACHE_DIR,
                     ).to(self.device)
                     logger.info("ControlNet loaded successfully.")
@@ -131,13 +159,28 @@ class HiDreamModel(BaseModel):
                         llama_model_name, cache_dir=AppConfig.CACHE_DIR
                     )
                     logger.info(f"Loading Llama text_encoder_4 from {llama_model_name} for HiDream-I1...")
+                    
+                    # Pentru transformers, "device_map" poate fi "auto"
+                    # Dar verificăm mai întâi dacă versiunea de transformers o suportă
+                    transformers_device_map = None
+                    try:
+                        import transformers
+                        if hasattr(transformers, "__version__"):
+                            from packaging import version
+                            if version.parse(transformers.__version__) >= version.parse("4.20.0"):
+                                transformers_device_map = "auto" if AppConfig.LOW_VRAM_MODE else None
+                                logger.info(f"Using transformers device_map={transformers_device_map} for LLM")
+                    except (ImportError, Exception) as e_vers:
+                        logger.warning(f"Couldn't determine transformers version: {e_vers}")
+                    
                     self.text_encoder_4 = LlamaForCausalLM.from_pretrained(
                         llama_model_name,
                         output_hidden_states=True,  # Required for HiDream
                         output_attentions=True,     # Required for HiDream
                         torch_dtype=AppConfig.DTYPE, # or torch.bfloat16 if supported and preferred
                         cache_dir=AppConfig.CACHE_DIR,
-                    ).to(self.device)
+                        device_map=transformers_device_map
+                    )
                     
                     logger.info("Llama text encoder and tokenizer for HiDream-I1 loaded successfully.")
                 except Exception as e_llama:
@@ -175,17 +218,43 @@ class HiDreamModel(BaseModel):
             # 5. VRAM optimizations (after loading pipeline)
             if self.pipeline: # Verify pipeline was loaded
                 if AppConfig.LOW_VRAM_MODE:
-                    logger.info("Enabling model CPU offload for main pipeline.")
-                    self.pipeline.enable_model_cpu_offload()
+                    # === DEZACTIVAT MODEL CPU OFFLOAD ===
+                    logger.info("SKIPPING model CPU offload (dezactivat pentru a evita blocaje)")
+                    
+                    # În schimb, mutăm direct pe dispozitiv
+                    try:
+                        logger.info(f"Moving pipeline directly to device {self.device}...")
+                        self.pipeline.to(self.device)
+                        logger.info(f"Pipeline moved to {self.device} successfully.")
+                    except Exception as e_device:
+                        logger.error(f"Could not move pipeline to device: {e_device}")
                     
                     # Enable VAE slicing to save memory
-                    logger.info("Enabling VAE slicing for memory optimization.")
-                    self.pipeline.enable_vae_slicing()
+                    try:
+                        logger.info("Enabling VAE slicing for memory optimization.")
+                        self.pipeline.enable_vae_slicing()
+                        logger.info("VAE slicing enabled.")
+                    except Exception as e_vae_slice:
+                        logger.warning(f"Could not enable VAE slicing: {e_vae_slice}")
+                    
+                    # Dezactivăm sequential CPU offloading
+                    # Dar activăm attention slicing
+                    if hasattr(self.pipeline, "enable_attention_slicing"):
+                        try:
+                            logger.info("Enabling attention slicing for main pipeline.")
+                            self.pipeline.enable_attention_slicing()
+                            logger.info("Attention slicing enabled.")
+                        except Exception as e_attn:
+                            logger.warning(f"Could not enable attention slicing: {e_attn}")
                     
                     # Optionally enable tiling for very large images
                     if hasattr(AppConfig, 'ENABLE_VAE_TILING') and AppConfig.ENABLE_VAE_TILING:
-                        logger.info("Enabling VAE tiling for large images.")
-                        self.pipeline.enable_vae_tiling()
+                        try:
+                            logger.info("Enabling VAE tiling for large images.")
+                            self.pipeline.enable_vae_tiling()
+                            logger.info("VAE tiling enabled.")
+                        except Exception as e_tiling:
+                            logger.warning(f"Could not enable VAE tiling: {e_tiling}")
                 else:
                     logger.info("Moving main pipeline to device.")
                     self.pipeline.to(self.device)
@@ -209,42 +278,10 @@ class HiDreamModel(BaseModel):
 
 
             # 7. Load Refiner Pipeline (if enabled and configured)
-            if self.use_refiner and self.refiner_config.get("pretrained_model_name_or_path"):
-                logger.info(f"Loading Refiner pipeline from {self.refiner_config['pretrained_model_name_or_path']}...")
-                try:
-                    # VAE can be reused or a refiner-specific one can be loaded if needed
-                    refiner_vae = self.vae # Reuse main VAE
-                    # refiner_vae = AutoencoderKL.from_pretrained(self.refiner_config["vae_name_or_path"] or self.config["vae_name_or_path"], torch_dtype=AppConfig.DTYPE).to(self.device)
-
-                    self.refiner_pipeline = StableDiffusionXLImg2ImgPipeline.from_pretrained(
-                        self.refiner_config["pretrained_model_name_or_path"],
-                        vae=refiner_vae,
-                        torch_dtype=AppConfig.DTYPE,
-                        use_safetensors=self.refiner_config.get("use_safetensors", True),
-                        cache_dir=AppConfig.CACHE_DIR,
-                    )
-                    
-                    if AppConfig.LOW_VRAM_MODE:
-                        logger.info("Enabling model CPU offload for refiner pipeline.")
-                        self.refiner_pipeline.enable_model_cpu_offload()
-                        
-                        # Enable VAE optimizations for refiner too
-                        self.refiner_pipeline.enable_vae_slicing()
-                        if hasattr(AppConfig, 'ENABLE_VAE_TILING') and AppConfig.ENABLE_VAE_TILING:
-                            self.refiner_pipeline.enable_vae_tiling()
-                    else:
-                        logger.info("Moving refiner pipeline to device.")
-                        self.refiner_pipeline.to(self.device)
-                    logger.info("Refiner pipeline loaded successfully.")
-
-                except Exception as e_refiner:
-                    logger.error(f"Failed to load Refiner pipeline: {e_refiner}. Disabling refiner.", exc_info=True)
-                    self.use_refiner = False
-                    self.refiner_pipeline = None
-            else:
-                logger.info("Refiner not used or not configured with a model path.")
-                self.use_refiner = False
-                self.refiner_pipeline = None
+            # === DEZACTIVAT REFINER COMPLET PENTRU A ECONOMISI MEMORIE ===
+            logger.info("DEZACTIVAT REFINER pentru a economisi memorie")
+            self.use_refiner = False
+            self.refiner_pipeline = None
 
 
             # 8. Load configured LoRAs (if main pipeline exists)
@@ -337,6 +374,7 @@ class HiDreamModel(BaseModel):
         
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            gc.collect()
             logger.info("CUDA cache emptied.")
             
         self.is_loaded = False
@@ -377,8 +415,6 @@ class HiDreamModel(BaseModel):
             else self.config.get("inference_steps", ModelConfig.GENERATION_PARAMS["default_steps"])
         )
         
-        effective_refiner_strength = refiner_strength if refiner_strength is not None else AppConfig.REFINER_STRENGTH
-        
         effective_negative_prompt = negative_prompt if negative_prompt is not None else ModelConfig.GENERATION_PARAMS.get("negative_prompt", "")
 
         # Prepare pipeline arguments
@@ -393,6 +429,14 @@ class HiDreamModel(BaseModel):
             "generator": gen,
         }
 
+        # Activează memory efficient attention dacă este posibil
+        if hasattr(self.pipeline, "enable_xformers_memory_efficient_attention") and not os.environ.get("DIFFUSERS_DISABLE_XFORMERS", "0") == "1":
+            try:
+                self.pipeline.enable_xformers_memory_efficient_attention()
+                logger.info("Activat xformers memory efficient attention")
+            except Exception as e_xf:
+                logger.warning(f"Nu s-a putut activa xformers: {e_xf}")
+
         if self.controlnet and controlnet_conditioning_scale is not None:
             # For ControlNet, add specific parameters
             pipeline_args["controlnet_conditioning_scale"] = controlnet_conditioning_scale
@@ -403,28 +447,28 @@ class HiDreamModel(BaseModel):
 
         try:
             logger.info(f"Processing with main pipeline. Steps: {effective_num_inference_steps}, Guidance: {guidance_scale}, Strength: {strength}")
+            
+            # Eliberează memoria înainte de inference
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+            
+            # Adăugare parametru "height" și "width" cu dimensiuni divizibile cu 8
+            # Acest lucru poate ajuta la optimizarea memoriei în unele cazuri
+            if "height" not in pipeline_args and "width" not in pipeline_args:
+                img_h, img_w = image_pil.height, image_pil.width
+                # Rotunjește la multiplu de 8 pentru optimizare
+                new_h = (img_h // 8) * 8
+                new_w = (img_w // 8) * 8
+                if new_h != img_h or new_w != img_w:
+                    logger.info(f"Ajustare dimensiuni la multipli de 8: {img_h}x{img_w} -> {new_h}x{new_w}")
+                    pipeline_args["height"] = new_h
+                    pipeline_args["width"] = new_w
+            
             out = self.pipeline(**pipeline_args)
             result_img = out.images[0]
 
-            if self.use_refiner and self.refiner_pipeline:
-                logger.info(f"Applying Refiner. Strength: {effective_refiner_strength}")
-                # For refiner, strength has a different meaning (how much to modify the image from base)
-                # Number of steps for refiner can be different
-                refiner_steps = self.refiner_config.get("inference_steps", max(10, effective_num_inference_steps // 3))
-                
-                refiner_args = {
-                    "prompt": prompt, # Refiner can use the same prompt
-                    "negative_prompt": effective_negative_prompt,
-                    "image": result_img, # Image generated by main pipeline
-                    "num_inference_steps": refiner_steps,
-                    "guidance_scale": guidance_scale, # Can be adjusted for refiner
-                    "strength": effective_refiner_strength, # Control refiner effect
-                    "generator": gen, # Reuse generator for consistency
-                }
-
-                out_refined = self.refiner_pipeline(**refiner_args)
-                result_img = out_refined.images[0]
-                logger.info("Refiner applied successfully.")
+            # === REFINER DEZACTIVAT ÎN ACEASTĂ VERSIUNE ===
 
             return {"result": result_img, "success": True, "message": "Processing completed successfully"}
         

@@ -3,6 +3,7 @@
 
 """
 Gradio interface components for FusionFrame 2.0
+Compatible with Gradio 4.19.0
 """
 
 import gradio as gr
@@ -99,12 +100,30 @@ def create_advanced_settings_panel() -> List[gr.components.Component]:
             visible=AppConfig.USE_REFINER
         )
     
+    # Post-processing options row 1
+    with gr.Row():
+        seamless_blending = gr.Checkbox(
+            value=True,
+            label="Seamless Blending", 
+            info="Smooth mask edges for better integration"
+        )
+        color_harmonization = gr.Checkbox(
+            value=True,
+            label="Color Harmonization", 
+            info="Adjust edited colors to match the original image"
+        )
+    
     # Make refiner_strength visible only when use_refiner is enabled
+    # Updated to Gradio 4.x event handling
+    def update_refiner_visibility(use_refiner_value):
+        return gr.update(visible=use_refiner_value)
+        
     use_refiner.change(
-        fn=lambda x: {"visible": x},
+        fn=update_refiner_visibility,
         inputs=[use_refiner],
         outputs=[refiner_strength]
     )
     
-    return [num_steps, guidance, enhance_details, fix_faces, remove_artifacts, 
-            use_controlnet, use_refiner, refiner_strength]
+    return [num_steps, guidance, use_controlnet, use_refiner, refiner_strength, 
+            enhance_details, fix_faces, remove_artifacts,
+            seamless_blending, color_harmonization]

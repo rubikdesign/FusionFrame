@@ -4,6 +4,7 @@
 """
 Gradio interface for FusionFrame 2.0
 (Updated to include PostProcessor call)
+Compatible with Gradio 4.19.0
 """
 
 import os
@@ -94,11 +95,14 @@ class FusionFrameUI:
         global CSS_STYLES; css_to_use = CSS_STYLES if 'CSS_STYLES' in globals() else ""
         adv_settings_list = []
 
-        with gr.Blocks(theme=gr.themes.Soft(), css=css_to_use) as app:
+        # Create a soft theme with Gradio 4.x syntax
+        theme = gr.themes.Soft()
+
+        with gr.Blocks(theme=theme, css=css_to_use) as app:
             gr.Markdown(f"# 🚀 FusionFrame {self.config.VERSION} - Advanced AI Image Editor")
             with gr.Row(equal_height=False):
                 with gr.Column(scale=1): # Input
-                    image_input = gr.Image(type="pil", label="Upload Image", elem_id="image_input", height=400)
+                    image_input = gr.Image(label="Upload Image", elem_id="image_input", height=400)
                     with gr.Row():
                         prompt = gr.Textbox(label="Edit Instructions", placeholder="E.g., 'Remove the car'", elem_id="prompt-input", scale=3)
                         strength = gr.Slider(minimum=0.1, maximum=1.0, value=0.75, step=0.05, label="Edit Strength", info="Higher = more dramatic", scale=1)
@@ -115,7 +119,8 @@ class FusionFrameUI:
             # Examples
             global create_examples
             if create_examples and callable(create_examples):
-                 example_list = create_examples(); gr.Examples(examples=example_list, inputs=[prompt, strength], label="Example Prompts")
+                example_list = create_examples()
+                gr.Examples(examples=example_list, inputs=[prompt, strength], label="Example Prompts")
             else: logger.debug("create_examples fn missing or not callable.")
 
             # Advanced Settings & Post-Processing
@@ -126,25 +131,24 @@ class FusionFrameUI:
                     adv_settings_list = create_advanced_settings_panel()
                     if not isinstance(adv_settings_list, list): adv_settings_list = self._create_fallback_advanced_settings()
                 else: adv_settings_list = self._create_fallback_advanced_settings()
-                # Link refiner visibility
-                self._link_refiner_visibility(adv_settings_list)
+                # Link refiner visibility (handled in components.py in Gradio 4.x)
 
             # Tips
             with gr.Accordion("Tips & Info", open=False): gr.Markdown(self._get_tips_markdown())
 
-            # Run Button
-            run_btn.click( fn=self.process_image_gradio_wrapper,
-                           inputs=[image_input, prompt, strength] + adv_settings_list, # Include all settings
-                           outputs=[image_output, mask_output, depth_output, info_json, status_area] )
+            # Run Button - Updated to Gradio 4.x event handler syntax
+            run_btn.click(
+                fn=self.process_image_gradio_wrapper,
+                inputs=[image_input, prompt, strength] + adv_settings_list, # Include all settings
+                outputs=[image_output, mask_output, depth_output, info_json, status_area]
+            )
         logger.info("Gradio interface created.")
         return app
 
     def _link_refiner_visibility(self, components_list):
-         """Link refiner strength slider visibility to use_refiner checkbox."""
-         use_refiner = next((c for c in components_list if isinstance(c, gr.Checkbox) and 'refiner' in getattr(c,'label','').lower()), None)
-         ref_strength = next((c for c in components_list if isinstance(c, gr.Slider) and 'refiner strength' in getattr(c,'label','').lower()), None)
-         if use_refiner and ref_strength: use_refiner.change(lambda x: gr.update(visible=x), inputs=[use_refiner], outputs=[ref_strength])
-         else: logger.warning("Could not find Refiner Checkbox or Strength Slider to link visibility.")
+        """Link refiner strength slider visibility to use_refiner checkbox - For Gradio 3.x only"""
+        # Handled differently in components.py for Gradio 4.x
+        logger.info("Refiner visibility linking handled in components.py for Gradio 4.x")
 
     def _get_tips_markdown(self):
          """Return Markdown text for Tips section."""
@@ -165,20 +169,40 @@ class FusionFrameUI:
         """Fallback for advanced UI settings (including post-processing)."""
         cfg = self.config; comps = []
         with gr.Row(): # Row 1: Steps and Guidance
-            comps.extend([ gr.Slider(minimum=10, maximum=150, value=getattr(cfg,'DEFAULT_STEPS',50), step=1, label="Inference Steps"),
-                           gr.Slider(minimum=1.0, maximum=20.0, value=getattr(cfg,'DEFAULT_GUIDANCE_SCALE',7.5), step=0.5, label="Guidance Scale") ])
+            comps.extend([
+                gr.Slider(minimum=10, maximum=150, value=getattr(cfg,'DEFAULT_STEPS',50), step=1, label="Inference Steps"),
+                gr.Slider(minimum=1.0, maximum=20.0, value=getattr(cfg,'DEFAULT_GUIDANCE_SCALE',7.5), step=0.5, label="Guidance Scale")
+            ])
         with gr.Row(): # Row 2: ControlNet and Refiner
-             use_refiner_default = getattr(cfg,'USE_REFINER',True)
-             comps.extend([ gr.Checkbox(label="Use ControlNet", value=True),
-                            gr.Checkbox(label="Use Refiner", value=use_refiner_default),
-                            gr.Slider(minimum=0.0, maximum=1.0, value=getattr(cfg,'REFINER_STRENGTH',0.3), step=0.05, label="Refiner Strength", visible=use_refiner_default) ])
+            use_refiner_default = getattr(cfg,'USE_REFINER',True)
+            comps.extend([
+                gr.Checkbox(label="Use ControlNet", value=True),
+                gr.Checkbox(label="Use Refiner", value=use_refiner_default),
+                gr.Slider(minimum=0.0, maximum=1.0, value=getattr(cfg,'REFINER_STRENGTH',0.3), step=0.05, label="Refiner Strength", visible=use_refiner_default)
+            ])
         with gr.Row(): # Row 3: Post-Processing (part 1)
-             comps.extend([ gr.Checkbox(label="Enhance Details", value=False, info="Use ESRGAN/Sharpening"), # Default False
-                            gr.Checkbox(label="Fix Faces", value=True, info="Use GPEN/CodeFormer"), # Default True
-                            gr.Checkbox(label="Remove Artifacts", value=False, info="Apply light smoothing") ]) # Default False
+            comps.extend([
+                gr.Checkbox(label="Enhance Details", value=False, info="Use ESRGAN/Sharpening"), # Default False
+                gr.Checkbox(label="Fix Faces", value=True, info="Use GPEN/CodeFormer"), # Default True
+                gr.Checkbox(label="Remove Artifacts", value=False, info="Apply light smoothing") # Default False
+            ])
         with gr.Row(): # Row 4: Post-Processing (part 2)
-             comps.extend([ gr.Checkbox(label="Seamless Blending", value=True, info="Smooth mask edges"), # Default True
-                            gr.Checkbox(label="Color Harmonization", value=True, info="Adjust edited colors") ]) # Default True
+            comps.extend([
+                gr.Checkbox(label="Seamless Blending", value=True, info="Smooth mask edges"), # Default True
+                gr.Checkbox(label="Color Harmonization", value=True, info="Adjust edited colors") # Default True
+            ])
+            
+        # Connect refiner visibility in Gradio 4.x style
+        use_refiner = comps[3]  # Based on index in the list
+        refiner_strength = comps[4]  # Based on index in the list
+        
+        # Update visibility with Gradio 4.x syntax
+        use_refiner.change(
+            fn=lambda x: gr.update(visible=x),
+            inputs=[use_refiner],
+            outputs=[refiner_strength]
+        )
+        
         return comps
 
     def process_image_gradio_wrapper(self, *args):

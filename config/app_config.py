@@ -35,8 +35,12 @@ class AppConfig:
     # Memory optimizations
     MAX_WORKERS = min(4, os.cpu_count() or 2)
     TILE_SIZE = 512
-    LOW_VRAM_MODE = torch.cuda.is_available() and \
-                    torch.cuda.get_device_properties(0).total_memory < 6e9
+    
+    # Forțează LOW_VRAM_MODE să fie True, indiferent de cât VRAM are placa
+    LOW_VRAM_MODE = True
+    
+    # Activează opțiunea VAE tiling pentru imagini mari
+    ENABLE_VAE_TILING = True
     
     # Application directories
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
