@@ -51,179 +51,204 @@ class FluxModel(BaseModel):
         self.pipeline = None
         self.lora_weights = []
         self.is_loaded = False
-    
+
+
     def load(self) -> bool:
         """
-        Load FLUX model with memory optimizations
-        
+        Load FLUX model with memory optimizations using FluxPipeline.
+
         Returns:
             True if loading succeeded, False otherwise
         """
-        logger.info(f"Loading FLUX model '{self.model_id}'")
+        logger.info(f"Loading FLUX model '{self.model_id}' with FluxPipeline")
         start_time = time.time()
-        
+
         # Clean GPU memory before loading
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
-            logger.info(f"CUDA memory after cleanup: {torch.cuda.memory_allocated(self.device) / 1024**3:.2f} GB used, {torch.cuda.memory_reserved(self.device) / 1024**3:.2f} GB reserved")
-        
+            logger.info(f"CUDA memory before FLUX load: {torch.cuda.memory_allocated(self.device) / 1024**3:.2f} GB used, {torch.cuda.memory_reserved(self.device) / 1024**3:.2f} GB reserved")
+
         try:
-            from diffusers import (
-                StableDiffusionXLInpaintPipeline,
-                AutoencoderKL,
-                EulerAncestralDiscreteScheduler,
-                ControlNetModel
-            )
-            
-            # 1. Load VAE
-            logger.info(f"Loading VAE from {self.config['vae_name_or_path']}...")
-            self.vae = AutoencoderKL.from_pretrained(
-                self.config["vae_name_or_path"],
-                torch_dtype=AppConfig.DTYPE,
-                cache_dir=AppConfig.CACHE_DIR
-            ).to(self.device)
-            logger.info("VAE loaded successfully.")
-            
-            # 2. Load ControlNet if configured
+            from diffusers import FluxPipeline, AutoencoderKL, ControlNetModel
+            # Scheduler-ul este de obicei gestionat intern de FluxPipeline sau configurat specific.
+            # Nu mai importăm EulerAncestralDiscreteScheduler aici pentru a-l seta manual inițial.
+
+            # Determine effective torch_dtype (bfloat16 is preferred for FLUX if supported)
+            effective_torch_dtype = AppConfig.DTYPE
+            if str(AppConfig.DTYPE).lower() == "torch.bfloat16": # Dacă AppConfig.DTYPE este setat la bfloat16
+                if AppConfig.DEVICE == "cuda" and not torch.cuda.is_bf16_supported():
+                    logger.warning("Configured DTYPE is bfloat16, but it's not supported on this GPU. Falling back to float32 for FluxPipeline.")
+                    effective_torch_dtype = torch.float32
+                elif AppConfig.DEVICE == "cpu":
+                    logger.warning("Configured DTYPE is bfloat16, which is not recommended for CPU. Using float32 for FluxPipeline.")
+                    effective_torch_dtype = torch.float32
+                else:
+                    effective_torch_dtype = torch.bfloat16 # Confirmă utilizarea bfloat16
+            elif str(AppConfig.DTYPE).lower() == "torch.float16":
+                 # FLUX e optimizat pentru bfloat16, float16 poate merge dar bfloat16 e preferat.
+                 logger.info(f"AppConfig.DTYPE is {AppConfig.DTYPE}. FLUX documentation often suggests bfloat16.")
+                 effective_torch_dtype = torch.float16
+            else: # Default la float32
+                effective_torch_dtype = torch.float32
+
+            logger.info(f"Attempting to load FLUX pipeline '{self.config['pretrained_model_name_or_path']}' with dtype: {effective_torch_dtype}")
+
+            # 1. Load VAE (opțional explicit, FluxPipeline ar putea să-l gestioneze)
+            # FluxPipeline ar trebui să poată încărca VAE-ul specificat în configurația sa internă
+            # sau din `self.config["vae_name_or_path"]` dacă este necesar și suportat.
+            # Pentru FLUX.1-dev, este posibil ca VAE-ul să fie parte din pachetul principal.
+            # Vom încerca să încărcăm VAE-ul explicit dacă este specificat în config,
+            # și îl vom pasa la pipeline dacă FluxPipeline îl acceptă.
+            self.vae = None # Resetează VAE-ul intern
+            if self.config.get("vae_name_or_path"):
+                try:
+                    logger.info(f"Loading VAE explicitly from {self.config['vae_name_or_path']}...")
+                    self.vae = AutoencoderKL.from_pretrained(
+                        self.config["vae_name_or_path"],
+                        torch_dtype=effective_torch_dtype, # Potrivește dtype-ul
+                        cache_dir=AppConfig.CACHE_DIR,
+                    )
+                    # Nu muta pe self.device aici; lasă pipeline-ul să gestioneze sau fă-o după încărcarea pipeline-ului.
+                    logger.info("VAE loaded successfully (will be moved to device with pipeline or by offload).")
+                except Exception as e_vae_load:
+                    logger.error(f"Failed to load VAE from {self.config['vae_name_or_path']}: {e_vae_load}. Proceeding without explicitly passed VAE.")
+                    self.vae = None
+
+
+            # 2. Load ControlNet if configured (atenție la compatibilitatea cu FluxPipeline)
+            self.controlnet = None # Resetează ControlNet intern
             if ModelConfig.CONTROLNET_CONFIG and ModelConfig.CONTROLNET_CONFIG.get("model_id"):
-                logger.info(f"Loading ControlNet from {ModelConfig.CONTROLNET_CONFIG['model_id']}...")
+                logger.warning("ControlNet is configured, but FluxPipeline may not have direct built-in support for it "
+                               "in the same way as StableDiffusion pipelines. ControlNet will be loaded but NOT passed to FluxPipeline by default.")
                 try:
                     self.controlnet = ControlNetModel.from_pretrained(
                         ModelConfig.CONTROLNET_CONFIG["model_id"],
-                        torch_dtype=AppConfig.DTYPE,
+                        torch_dtype=effective_torch_dtype,
                         use_safetensors=True,
-                        variant="fp16" if AppConfig.DTYPE == torch.float16 else None,
-                        cache_dir=AppConfig.CACHE_DIR
-                    ).to(self.device)
-                    logger.info("ControlNet loaded successfully.")
+                        # variant="fp16" if effective_torch_dtype == torch.float16 else None, # Specific SD
+                        cache_dir=AppConfig.CACHE_DIR,
+                    ) # Nu muta pe device încă
+                    logger.info("ControlNet model loaded (not passed to FluxPipeline).")
                 except Exception as e_ctrl:
                     logger.warning(f"ControlNet download/load failed: {e_ctrl}, continuing without it.")
                     self.controlnet = None
             else:
                 logger.info("ControlNet not configured or model_id missing.")
-                self.controlnet = None
-            
-            # 3. Load main pipeline
-            logger.info(f"Loading FLUX pipeline from {self.config['pretrained_model_name_or_path']}...")
-            
-            # Prepare pipeline parameters
-            pipeline_kwargs = {
-                "vae": self.vae,
-                "torch_dtype": AppConfig.DTYPE,
-                "variant": "fp16" if AppConfig.DTYPE == torch.float16 else None,
+
+
+            # 3. Load main FLUX pipeline
+            pipeline_load_args = {
+                "torch_dtype": effective_torch_dtype,
                 "use_safetensors": self.config.get("use_safetensors", True),
-                "cache_dir": AppConfig.CACHE_DIR
+                "cache_dir": AppConfig.CACHE_DIR,
             }
-            
-            if self.controlnet:
-                pipeline_kwargs["controlnet"] = self.controlnet
-            
-            self.pipeline = StableDiffusionXLInpaintPipeline.from_pretrained(
-                self.config["pretrained_model_name_or_path"],
-                **pipeline_kwargs
+
+            # Adaugă VAE-ul dacă a fost încărcat și dacă FluxPipeline îl acceptă ca argument.
+            # Documentația FluxPipeline.from_pretrained() va clarifica acest lucru.
+            # De obicei, pentru pipeline-uri mai noi, integrate, VAE-ul e încărcat din repo-ul principal.
+            if self.vae:
+                pipeline_load_args["vae"] = self.vae
+                logger.info("VAE instance will be passed to FluxPipeline.from_pretrained.")
+
+
+            self.pipeline = FluxPipeline.from_pretrained(
+                self.config["pretrained_model_name_or_path"], # ex: "black-forest-labs/FLUX.1-dev"
+                **pipeline_load_args
             )
-            logger.info("FLUX pipeline loaded successfully.")
-            
-            # 4. Apply memory optimizations
+            logger.info(f"FluxPipeline instance created from '{self.config['pretrained_model_name_or_path']}'.")
+
+            # 4. Aplică optimizările de memorie și mutarea pe dispozitiv
             if AppConfig.LOW_VRAM_MODE:
-                logger.info("Applying LOW_VRAM_MODE optimizations")
-                
-                # Move text encoders to CPU to save VRAM
-                if hasattr(self.pipeline, "text_encoder") and self.pipeline.text_encoder is not None:
-                    try:
-                        self.pipeline.text_encoder.to("cpu")
-                        logger.info("Moved text_encoder to CPU")
-                    except Exception as e_te:
-                        logger.warning(f"Could not move text_encoder to CPU: {e_te}")
-                
-                if hasattr(self.pipeline, "text_encoder_2") and self.pipeline.text_encoder_2 is not None:
-                    try:
-                        self.pipeline.text_encoder_2.to("cpu")
-                        logger.info("Moved text_encoder_2 to CPU")
-                    except Exception as e_te2:
-                        logger.warning(f"Could not move text_encoder_2 to CPU: {e_te2}")
-                
-                # Enable VAE slicing to save memory
+                logger.info("LOW_VRAM_MODE: Attempting to enable model CPU offload for FluxPipeline.")
                 try:
-                    logger.info("Enabling VAE slicing for memory optimization.")
-                    self.pipeline.enable_vae_slicing()
-                    logger.info("VAE slicing enabled.")
-                except Exception as e_vae_slice:
-                    logger.warning(f"Could not enable VAE slicing: {e_vae_slice}")
-                
-                # Enable attention slicing
-                if hasattr(self.pipeline, "enable_attention_slicing"):
-                    try:
-                        logger.info("Enabling attention slicing.")
-                        self.pipeline.enable_attention_slicing()
-                        logger.info("Attention slicing enabled.")
-                    except Exception as e_attn:
-                        logger.warning(f"Could not enable attention slicing: {e_attn}")
-                
-                # Enable tiling for large images if configured
-                if hasattr(AppConfig, 'ENABLE_VAE_TILING') and AppConfig.ENABLE_VAE_TILING:
-                    try:
-                        logger.info("Enabling VAE tiling for large images.")
-                        self.pipeline.enable_vae_tiling()
-                        logger.info("VAE tiling enabled.")
-                    except Exception as e_tiling:
-                        logger.warning(f"Could not enable VAE tiling: {e_tiling}")
-                
-                # Move model components to device
-                logger.info(f"Moving remaining FLUX pipeline components to {self.device}")
-                try:
-                    # Move UNet to device (text encoders remain on CPU)
-                    if hasattr(self.pipeline, "unet"):
-                        self.pipeline.unet.to(self.device)
-                    else:
-                        # Fallback if UNet not directly accessible
-                        self.pipeline.to(self.device)
-                except Exception as e_device:
-                    logger.error(f"Error moving pipeline components to device: {e_device}")
-            else:
-                # If not LOW_VRAM_MODE, move everything to device
-                logger.info(f"Moving FLUX pipeline to {self.device}")
+                    # Metoda specifică FLUX pentru offload inteligent
+                    self.pipeline.enable_model_cpu_offload()
+                    logger.info("FluxPipeline.enable_model_cpu_offload() called successfully.")
+                    # VAE și ControlNet (dacă sunt încărcate și nu sunt gestionate de offload)
+                    # ar putea necesita mutare manuală dacă nu sunt acoperite de enable_model_cpu_offload.
+                    # Totuși, enable_model_cpu_offload ar trebui să fie destul de cuprinzător.
+                    if self.vae and hasattr(self.vae, "to") and AppConfig.DEVICE != "cpu": # Dacă VAE e încărcat și nu e pe CPU
+                        logger.info("Ensuring VAE is on CPU for LOW_VRAM_MODE after pipeline offload setup.")
+                        # self.vae.to("cpu") # Comentat - enable_model_cpu_offload ar trebui să gestioneze
+                    if self.controlnet and hasattr(self.controlnet, "to") and AppConfig.DEVICE != "cpu":
+                         logger.info("Ensuring ControlNet is on CPU for LOW_VRAM_MODE (if loaded separately).")
+                         self.controlnet.to("cpu") # ControlNet nu e parte din pipeline FLUX
+                except AttributeError:
+                    logger.warning("FluxPipeline instance does not have 'enable_model_cpu_offload'. "
+                                   "Attempting manual offload of text encoders if applicable (though FLUX has integrated transformers).")
+                    # Fallback la mutarea manuală a componentelor dacă `enable_model_cpu_offload` nu există
+                    # sau dacă vrem control mai fin (deși pentru FLUX, transformerele sunt mai integrate).
+                    # Acest bloc s-ar putea să nu fie necesar dacă enable_model_cpu_offload funcționează.
+                    for component_name in ["text_encoder", "text_encoder_2", "transformer"]: # "transformer" e componenta mare din FLUX
+                        if hasattr(self.pipeline, component_name) and getattr(self.pipeline, component_name) is not None:
+                            try:
+                                component = getattr(self.pipeline, component_name)
+                                component.to("cpu")
+                                logger.info(f"Manually moved FluxPipeline component '{component_name}' to CPU.")
+                            except Exception as e_manual_offload:
+                                logger.warning(f"Could not manually move '{component_name}' to CPU: {e_manual_offload}")
+                except Exception as e_offload:
+                    logger.error(f"Error during FluxPipeline CPU offload: {e_offload}")
+            else: # Nu este LOW_VRAM_MODE, mută totul pe dispozitivul principal
+                logger.info(f"Moving full FluxPipeline to device: {self.device}")
                 self.pipeline.to(self.device)
-            
-            # 5. Configure optimized scheduler
-            logger.info("Configuring EulerAncestralDiscreteScheduler for better results.")
-            try:
-                self.pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-                    self.pipeline.scheduler.config
-                )
-                logger.info("Scheduler configured as EulerAncestralDiscreteScheduler.")
-            except Exception as e_scheduler:
-                logger.warning(f"Failed to set EulerAncestralDiscreteScheduler: {e_scheduler}. Using default scheduler.")
-            
-            # 6. Load configured LoRAs (if present)
+                if self.vae and hasattr(self.vae, "to"): # Asigură-te că și VAE-ul (dacă e încărcat separat) e pe device
+                    self.vae.to(self.device)
+                if self.controlnet and hasattr(self.controlnet, "to"): # Și ControlNet (dacă e încărcat separat)
+                    self.controlnet.to(self.device)
+
+
+            # 5. Configurare Scheduler (Opțional - FluxPipeline ar trebui să aibă un default bun)
+            # Dacă vrei să suprascrii scheduler-ul default al FluxPipeline:
+            # try:
+            #     from diffusers import FlowMatchEulerDiscreteScheduler # Sau alt scheduler compatibil
+            #     if hasattr(self.pipeline, 'scheduler'):
+            #         self.pipeline.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
+            #             self.pipeline.scheduler.config
+            #         )
+            #         logger.info(f"Scheduler for FluxPipeline configured as {self.pipeline.scheduler.__class__.__name__}.")
+            #     else:
+            #         logger.warning("FluxPipeline instance does not have a 'scheduler' attribute to override.")
+            # except Exception as e_scheduler:
+            #     logger.warning(f"Failed to set custom scheduler for FluxPipeline: {e_scheduler}. Using default.")
+            logger.info(f"FluxPipeline is using its default scheduler: {self.pipeline.scheduler.__class__.__name__}")
+
+
+            # 6. Load configured LoRAs (if present and FluxPipeline supports them)
+            # Verifică dacă FluxPipeline are metode standard `load_lora_weights` și `set_adapters`.
             if self.config.get("lora_weights"):
-                self._load_loras()
-            
-            self.model = self.pipeline
+                if hasattr(self.pipeline, "load_lora_weights") and hasattr(self.pipeline, "set_adapters"):
+                    self._load_loras() # Metoda ta existentă _load_loras ar trebui să funcționeze
+                else:
+                    logger.warning("FluxPipeline instance does not seem to support LoRA loading via standard methods. Skipping LoRA loading.")
+
+
+            self.model = self.pipeline # Setează modelul principal ca fiind pipeline-ul
             self.is_loaded = True
-            
-            # Log total loading time
+
             load_time = time.time() - start_time
-            logger.info(f"FLUX model '{self.model_id}' loaded successfully in {load_time:.2f} seconds.")
-            
-            # Log memory usage after loading
+            logger.info(f"FLUX model '{self.model_id}' (FluxPipeline) loaded successfully in {load_time:.2f} seconds.")
+
             if torch.cuda.is_available():
                 allocated = torch.cuda.memory_allocated(self.device) / (1024**3)
                 reserved = torch.cuda.memory_reserved(self.device) / (1024**3)
-                logger.info(f"CUDA memory after loading: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
-            
+                logger.info(f"CUDA memory after FLUX load: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
+
             return True
-            
+
         except ImportError as ie:
             logger.error(f"ImportError during FLUX model loading: {ie}. "
-                         "Ensure 'diffusers' is installed correctly.", exc_info=True)
+                         "Ensure 'diffusers' is installed correctly and FluxPipeline is available.", exc_info=True)
             self.is_loaded = False
             return False
         except Exception as e:
-            logger.error(f"Error loading FLUX model '{self.model_id}': {str(e)}", exc_info=True)
+            logger.error(f"Error loading FLUX model '{self.model_id}' with FluxPipeline: {str(e)}", exc_info=True)
             self.is_loaded = False
             return False
+
+    
+    
     
     def _load_loras(self) -> None:
         """Load configured LoRAs"""

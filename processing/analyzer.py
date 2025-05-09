@@ -178,7 +178,13 @@ class ImageAnalyzer:
         """Încarcă lazy detectorul de fețe (lightweight)."""
         if self.face_detector is None:
             self._manage_model_memory('face_detector')
-            self.face_detector = self.model_manager.load_model_with_memory_management('face_detector')
+            bundle = self.model_manager.get_model('face_detector')
+            # self.face_detector = self.model_manager.load_model_with_memory_management('face_detector')
+            if bundle and isinstance(bundle, dict):
+                self.face_detector = bundle.get('model')
+            else:
+                self.face_detector = None # Sau bundle direct dacă nu e dicționar
+
             if self.face_detector is None: 
                 logger.warning("MediaPipe Face Detector could not be loaded.")
             elif isinstance(self.face_detector, dict):
@@ -192,7 +198,13 @@ class ImageAnalyzer:
             
         if self.image_classifier_bundle is None:
             self._manage_model_memory('image_classifier')
-            self.image_classifier_bundle = self.model_manager.load_model_with_memory_management('image_classifier')
+
+
+            # self.image_classifier_bundle = self.model_manager.load_model_with_memory_management('image_classifier')
+            
+            self.image_classifier_bundle = self.model_manager.get_model('image_classifier')
+            
+            
             if self.image_classifier_bundle is None: 
                 logger.warning("Image Classifier could not be loaded.")
             # Verificăm dacă este pe CPU în mod lightweight
@@ -212,7 +224,11 @@ class ImageAnalyzer:
             
         if self.depth_estimator_bundle is None:
             self._manage_model_memory('depth_estimator')
-            self.depth_estimator_bundle = self.model_manager.load_model_with_memory_management('depth_estimator')
+
+
+            # self.depth_estimator_bundle = self.model_manager.load_model_with_memory_management('depth_estimator')
+            self.depth_estimator_bundle = self.model_manager.get_model('depth_estimator')
+            
             if self.depth_estimator_bundle is None: 
                 logger.warning("Depth Estimator could not be loaded.")
             # Verificăm dacă este pe CPU în mod lightweight
@@ -233,10 +249,19 @@ class ImageAnalyzer:
         if self.object_detector is None:
             self._manage_model_memory('yolo')
             # Încărcăm YOLO cu parametru explicit pentru lightweight
-            self.object_detector = self.model_manager.load_model_with_memory_management(
-                'yolo', 
-                {'force_cpu': self.force_cpu_for_all_models, 'lightweight': self.lightweight_mode}
-            )
+            # self.object_detector = self.model_manager.load_model_with_memory_management(
+            #     'yolo', 
+            #     {'force_cpu': self.force_cpu_for_all_models, 'lightweight': self.lightweight_mode}
+            # )
+
+            # Parametrii force_cpu și lightweight sunt acum gestionați intern de ModelManager
+            # pe baza AppConfig și a stării memoriei când se apelează _load_yolo_model.
+            # Nu mai este necesar să-i pasăm explicit aici.
+            yolo_bundle = self.model_manager.get_model('yolo')
+            if yolo_bundle and isinstance(yolo_bundle, dict):
+                self.object_detector = yolo_bundle.get('model') # Atribuim direct modelul YOLO
+            else:
+                self.object_detector = None # Sau yolo_bundle dacă nu e dicționar și e direct modelul
             if self.object_detector is None:
                  logger.warning("YOLO Object Detector could not be loaded.")
             elif isinstance(self.object_detector, dict):
@@ -282,10 +307,16 @@ class ImageAnalyzer:
                 
             logits = outputs.logits
             probabilities = torch.nn.functional.softmax(logits, dim=-1)
-            top_probs, top_indices = torch.topk(probabilities, self.classifier_top_n, dim=-1)
+            num_classes_available = probabilities.shape[1]
+            k_to_use = min(self.classifier_top_n, num_classes_available)
+
+            if k_to_use <= 0:
+                logger.warning(f"Image classifier has no predictable classes or k_to_use is {k_to_use} (top_n was {self.classifier_top_n}, num_classes {num_classes_available}). Skipping top-k for this image.")
+                return []
             
+            top_probs, top_indices = torch.topk(probabilities, k_to_use, dim=-1)            
             results = []
-            for i in range(min(self.classifier_top_n, top_indices.size(1))):
+            for i in range(k_to_use):
                 label_id = top_indices[0, i].item()
                 label_name = model.config.id2label.get(label_id, f"unknown_id_{label_id}")
                 score = top_probs[0, i].item()

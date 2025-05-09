@@ -214,6 +214,21 @@ class PostProcessor:
              return np.where(mask[:, :, np.newaxis] > 0, enhanced_result, image_np).astype(np.uint8)
         else: return enhanced_result.astype(np.uint8)
 
+
+
+    def _convert_cv2_to_pil(self, image_np: np.ndarray) -> Image.Image:
+        """Converteste o imagine NumPy BGR in PIL Image RGB."""
+        if image_np.ndim == 2:  # Grayscale
+            return Image.fromarray(image_np)
+        elif image_np.shape[2] == 3:  # BGR
+            rgb_np = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+            return Image.fromarray(rgb_np)
+        elif image_np.shape[2] == 4:  # BGRA
+            rgba_np = cv2.cvtColor(image_np, cv2.COLOR_BGRA2RGBA)
+            return Image.fromarray(rgba_np)
+        else:
+            raise ValueError(f"Unsupported NumPy shape for PIL conversion: {image_np.shape}")
+
     def _fix_faces_step(self, image_np: np.ndarray) -> np.ndarray:
         """Corectează fețele (GPEN/CodeFormer)."""
         logger.debug("Attempting face correction...")

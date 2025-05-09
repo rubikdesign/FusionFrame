@@ -29,6 +29,40 @@ class AddObjectPipeline(BasePipeline):
         self.post_processor = PostProcessor()
         self.prompt_enhancer = PromptEnhancer()
 
+
+    def _ensure_dimensions_multiple_of_8(self, image_np_or_pil):
+        """Asigură că dimensiunile imaginii sunt divizibile cu 8."""
+        if isinstance(image_np_or_pil, Image.Image):
+            width, height = image_np_or_pil.size
+            new_width = (width // 8) * 8
+            new_height = (height // 8) * 8
+            
+            # Dacă dimensiunile sunt deja divizibile cu 8, returnăm imaginea originală
+            if width == new_width and height == new_height:
+                return image_np_or_pil
+            
+            # Altfel, redimensionăm imaginea la dimensiunile corecte
+            logger.info(f"Redimensionare imagine de la {width}x{height} la {new_width}x{new_height} pentru a asigura divizibilitatea cu 8")
+            return image_np_or_pil.resize((new_width, new_height), Image.LANCZOS)
+        
+        elif isinstance(image_np_or_pil, np.ndarray):
+            height, width = image_np_or_pil.shape[:2]
+            new_height = (height // 8) * 8
+            new_width = (width // 8) * 8
+            
+            # Dacă dimensiunile sunt deja divizibile cu 8, returnăm imaginea originală
+            if width == new_width and height == new_height:
+                return image_np_or_pil
+            
+            # Altfel, redimensionăm imaginea la dimensiunile corecte
+            logger.info(f"Redimensionare numpy array de la {width}x{height} la {new_width}x{new_height} pentru a asigura divizibilitatea cu 8")
+            return cv2.resize(image_np_or_pil, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+        
+        else:
+            raise ValueError(f"Tip de imagine nesuportat: {type(image_np_or_pil)}")
+
+
+
     def process(self,
                image: Union[Image.Image, np.ndarray],
                prompt: str,
@@ -217,6 +251,13 @@ class AddObjectPipeline(BasePipeline):
             return None
             
         h, w = image_np.shape[:2]
+        # Asigură că dimensiunile sunt divizibile cu 8
+        h_fixed = (h // 8) * 8
+        w_fixed = (w // 8) * 8
+        if h != h_fixed or w != w_fixed:
+            image_np = cv2.resize(image_np, (w_fixed, h_fixed), interpolation=cv2.INTER_LANCZOS4)
+            h, w = h_fixed, w_fixed
+        
         mask = np.zeros((h, w), dtype=np.uint8)
         
         try:

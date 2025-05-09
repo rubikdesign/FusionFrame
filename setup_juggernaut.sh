@@ -1,3 +1,26 @@
+#!/bin/bash
+# Script pentru configurarea modelului Juggernaut cu link direct
+
+# Asigură-te că există directorul pentru modelul descărcat
+mkdir -p /workspace/FusionFrame/models/juggernaut
+
+# Descarcă modelul safetensors direct dacă nu există
+if [ ! -f "/workspace/FusionFrame/models/juggernaut/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors" ]; then
+    echo "Descărcare model Juggernaut-XL_v9..."
+    wget -O /workspace/FusionFrame/models/juggernaut/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors "https://huggingface.co/RunDiffusion/Juggernaut-XL-v9/resolve/main/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors?download=true"
+    echo "Descărcare completă."
+else
+    echo "Modelul Juggernaut-XL_v9 există deja."
+fi
+
+# Asigură-te că ai un backup pentru model_config.py
+if [ ! -f "/workspace/FusionFrame/config/model_config.py.backup" ]; then
+    cp /workspace/FusionFrame/config/model_config.py /workspace/FusionFrame/config/model_config.py.backup
+    echo "Creat backup pentru model_config.py"
+fi
+
+# Actualizează model_config.py pentru a folosi fișierul local
+cat > /workspace/FusionFrame/config/model_config.py << 'EOF'
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
@@ -10,18 +33,17 @@ class ModelConfig:
     """Centralized configuration for AI models and their parameters."""
 
     # --- Main Model Selection ---
-    # Păstrăm Juggernaut-XL-v9 și îl vom încărca folosind from_single_file
     MAIN_MODEL = "RunDiffusion/Juggernaut-XL-v9"
     BACKUP_MODEL_NAME = "HiDream-I1-Fast"
 
     # --- Configuration for SDXL Inpainting Models (e.g., Juggernaut-XL-v9) ---
     SDXL_INPAINT_CONFIG = {
-        # Calea către fișierul safetensors al Juggernaut-XL-v9
-        "pretrained_model_name_or_path": "RunDiffusion/Juggernaut-XL-v9/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors",
-        # VAE-ul este inclus în modelul Juggernaut
+        # Folosim calea locală către fișierul safetensors (descărcat direct)
+        "pretrained_model_name_or_path": "/workspace/FusionFrame/models/juggernaut/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors",
+        # VAE-ul este inclus în model
         "vae_name_or_path": None, 
         "use_safetensors": True,
-        "load_from_single_file": True,  # Această setare activează folosirea from_single_file
+        "load_from_single_file": True,  # Important: folosim from_single_file pentru modelul descărcat
         "lora_weights": [],
         "inference_steps": 30,
     }
@@ -148,3 +170,7 @@ class ModelConfig:
         "add": {"strength": 0.75, "num_inference_steps": 25, "guidance_scale": 7.0},
         "general": {"strength": 0.75, "num_inference_steps": 20, "guidance_scale": 7.0}
     }
+EOF
+
+echo "Configurația a fost actualizată pentru a folosi fișierul local safetensors al Juggernaut descărcat direct."
+echo "Acum poți reporni aplicația: ./run_fusionframe.sh"

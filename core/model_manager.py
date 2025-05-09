@@ -5,52 +5,72 @@
 Ai Models Manager used in FusionFrame 2.0
 """
 
+
 import os
 import gc
 import torch
 import logging
-import requests
-import zipfile
+import requests # Asigură-te că e instalat
+import zipfile # Asigură-te că e instalat
 import time
-from tqdm.auto import tqdm
+from tqdm.auto import tqdm # Asigură-te că e instalat
 from pathlib import Path
 from typing import Optional, Dict, Any, Union, List
 
-# Import BaseModel local (with fallback)
+# --- Importuri Clase Model ---
 try:
     from models.base_model import BaseModel
 except ImportError:
-    BaseModel = object #type: ignore
+    class BaseModel: #type: ignore
+        def __init__(self, model_id, device): self.model_id=model_id; self.device=device; self.is_loaded=False
+        def load(self): return False
+        def unload(self): return True
+        def get_info(self): return {}
+    logging.getLogger(__name__).error("BaseModel not found. Using mock.")
 
-# Importă FluxModel și HiDreamModel (HiDream poate fi păstrat ca backup sau pentru alte scopuri)
+
 try:
-    from models.flux_model import FluxModel
+    from models.flux_model import FluxModel # Dacă vrei să-l păstrezi ca opțiune
 except ImportError:
     FluxModel = None #type: ignore
-    logging.getLogger(__name__).error("FluxModel not found. Ensure flux_model.py exists in the models directory.")
+    logging.getLogger(__name__).warning("FluxModel not found.")
 
 try:
-    from models.hidream_model import HiDreamModel # Păstrează dacă HiDream este folosit ca backup
+    from models.hidream_model import HiDreamModel # Pentru backup
 except ImportError:
     HiDreamModel = None #type: ignore
     logging.getLogger(__name__).warning("HiDreamModel not found.")
 
+try:
+    from models.sdxl_inpaint_model import SDXLInpaintModel # Noul model principal
+except ImportError:
+    SDXLInpaintModel = None #type: ignore
+    logging.getLogger(__name__).error("SDXLInpaintModel not found! Critical for Juggernaut-XL.")
 
-from config.app_config import AppConfig
-from config.model_config import ModelConfig
 
-# Imports Transformers (with fallback)
+# --- Importuri Configurații ---
+try:
+    from config.app_config import AppConfig
+    from config.model_config import ModelConfig
+except ImportError:
+    class AppConfig: DEVICE="cpu"; LOW_VRAM_MODE=True; CACHE_DIR="cache"; MODEL_DIR="models"; DTYPE=torch.float32; ESSENTIAL_MODELS=["main"]; MIN_FREE_VRAM_MB=500; MODEL_LOADING_POLICY="KEEP_LOADED"; ensure_dirs=lambda:None #type: ignore
+    class ModelConfig: MAIN_MODEL="mock"; CONTROLNET_CONFIG={}; SAM_CONFIG={}; CLIP_CONFIG={}; OBJECT_DETECTOR_CONFIG={}; IMAGE_CLASSIFIER_CONFIG={}; DEPTH_ESTIMATOR_CONFIG={} #type: ignore
+    logging.getLogger(__name__).error("AppConfig/ModelConfig not found. Using mocks.")
+
+
+# --- Importuri Biblioteci Terțe ---
 try:
     from transformers import (
-        AutoImageProcessor, AutoModelForImageClassification, AutoModelForDepthEstimation
+        AutoImageProcessor, AutoModelForImageClassification, AutoModelForDepthEstimation,
+        CLIPSegProcessor, CLIPSegForImageSegmentation # Adăugat pentru _load_clipseg_model
     )
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
-    logging.getLogger(__name__).warning("Transformers library not found/outdated.")
+    logging.getLogger(__name__).warning("Transformers library not found or some components missing.")
     AutoImageProcessor, AutoModelForImageClassification, AutoModelForDepthEstimation = None, None, None #type: ignore
+    CLIPSegProcessor, CLIPSegForImageSegmentation = None, None #type: ignore
     TRANSFORMERS_AVAILABLE = False
 
-# SAM Predictor Imports (with fallback)
 try:
     from segment_anything import sam_model_registry, SamPredictor
     SAM_AVAILABLE = True
@@ -59,22 +79,44 @@ except ImportError:
     sam_model_registry, SamPredictor = None, None #type: ignore
     SAM_AVAILABLE = False
 
+try:
+    from ultralytics import YOLO # Pentru _load_yolo_model
+    ULTRALYTICS_AVAILABLE = True
+except ImportError:
+    YOLO = None #type: ignore
+    ULTRALYTICS_AVAILABLE = False
+    logging.getLogger(__name__).warning("Ultralytics YOLO library not found.")
+
+try:
+    import mediapipe as mp # Pentru modelele MediaPipe
+    MEDIAPIPE_AVAILABLE = True
+except ImportError:
+    mp = None #type: ignore
+    MEDIAPIPE_AVAILABLE = False
+    logging.getLogger(__name__).warning("MediaPipe library not found.")
+
+try:
+    from rembg import new_session as new_rembg_session # Alias pentru a evita conflicte
+    REMBG_AVAILABLE = True
+except ImportError:
+    new_rembg_session = None #type: ignore
+    REMBG_AVAILABLE = False
+    logging.getLogger(__name__).warning("Rembg library not found.")
+
+
 logger = logging.getLogger(__name__)
 
 class ModelManager:
     _instance: Optional['ModelManager'] = None
     _initialized: bool = False
 
-    # Lista modelelor care pot fi încărcate pe CPU pentru a economisi VRAM
     CPU_FRIENDLY_MODELS = [
         'image_classifier', 'depth_estimator', 'yolo',
-        'mediapipe', 'face_detector', 'rembg'
+        'mediapipe', 'face_detector', 'rembg', 'clipseg' # Adăugat clipseg
     ]
+    ESSENTIAL_GPU_MODELS = ['main', 'sam_predictor'] # SAM e mai bun pe GPU
 
-    # Lista modelelor care sunt esențiale și ar trebui să rămână pe GPU
-    ESSENTIAL_GPU_MODELS = ['main', 'sam_predictor', 'clipseg']
-
-    def __new__(cls): # Singleton
+    def __new__(cls):
         if cls._instance is None:
             cls._instance = super(ModelManager, cls).__new__(cls)
             cls._instance._initialized = False
@@ -86,8 +128,11 @@ class ModelManager:
         self.models: Dict[str, Any] = {}
         self.config = AppConfig
         self.model_config = ModelConfig
-        self.config.ensure_dirs() #type: ignore
+        if hasattr(self.config, 'ensure_dirs') and callable(self.config.ensure_dirs):
+            self.config.ensure_dirs()
         self._initialized = True
+        self.memory_stats: Dict[str, Any] = {"last_check": 0, "loaded_models": [], "memory_usage": {}}
+        logger.info("ModelManager initialized")
 
         self.memory_stats: Dict[str, Any] = {
             "last_check": 0,
@@ -310,61 +355,74 @@ class ModelManager:
 
     # --- Model loading methods ---
     def load_main_model(self) -> None:
-        logger.debug(f"Request main model load (Model ID from config: {ModelConfig.MAIN_MODEL})")
+        """
+        Loads the main generation model based on ModelConfig.MAIN_MODEL.
+        Supports SDXLInpaintModel (e.g., Juggernaut-XL), FluxModel, and HiDreamModel.
+        """
+        main_model_id_from_config = getattr(ModelConfig, 'MAIN_MODEL', 'NOT_CONFIGURED')
+        logger.debug(f"Request main model load. Configured MAIN_MODEL: '{main_model_id_from_config}'")
 
-        # Verifică dacă modelul principal este deja încărcat și este de tipul corect
-        current_main_model_type = None
-        if ModelConfig.MAIN_MODEL == "FLUX.1-dev" and FluxModel is not None:
-            current_main_model_type = FluxModel
-        elif ModelConfig.MAIN_MODEL == "HiDream-I1-Fast" and HiDreamModel is not None: # Sau alt ID pentru HiDream
-            current_main_model_type = HiDreamModel
-        # Adaugă alte modele principale aici dacă e cazul
+        ModelClassToLoad: Optional[type[BaseModel]] = None
+        expected_config_attr: Optional[str] = None
 
+        # Determine which model class and config to use
+        if main_model_id_from_config == "RunDiffusion/Juggernaut-XL-v9" and SDXLInpaintModel is not None:
+            ModelClassToLoad = SDXLInpaintModel
+            expected_config_attr = "SDXL_INPAINT_CONFIG"
+            logger.info(f"Preparing to load SDXLInpaintModel for '{main_model_id_from_config}'.")
+        elif main_model_id_from_config == "FLUX.1-dev" and FluxModel is not None:
+            ModelClassToLoad = FluxModel
+            expected_config_attr = "FLUX_CONFIG"
+            logger.info(f"Preparing to load FluxModel for '{main_model_id_from_config}'.")
+        elif main_model_id_from_config == "HiDream-I1-Fast" and HiDreamModel is not None: # Sau alt ID HiDream
+            ModelClassToLoad = HiDreamModel
+            expected_config_attr = "HIDREAM_CONFIG" # Asigură-te că HIDREAM_CONFIG există în ModelConfig
+            logger.info(f"Preparing to load HiDreamModel for '{main_model_id_from_config}'.")
+        # Adaugă aici alte `elif` pentru alte modele principale pe care vrei să le suporti
+
+        if ModelClassToLoad is None:
+            logger.error(f"Main model_id '{main_model_id_from_config}' is configured, but a corresponding "
+                         f"ModelClass is not available or not imported correctly in ModelManager. "
+                         f"(SDXLInpaintModel: {SDXLInpaintModel is not None}, FluxModel: {FluxModel is not None}, HiDreamModel: {HiDreamModel is not None})")
+            return
+
+        if expected_config_attr and not hasattr(ModelConfig, expected_config_attr):
+            logger.error(f"Configuration attribute '{expected_config_attr}' expected for model '{main_model_id_from_config}' "
+                         f"is missing in ModelConfig. Cannot load main model.")
+            return
+
+
+        # Check if the correct type of model is already loaded
         if 'main' in self.models and isinstance(self.models.get('main'), BaseModel) and self.models['main'].is_loaded:
-            if current_main_model_type and isinstance(self.models.get('main'), current_main_model_type):
-                logger.info(f"{ModelConfig.MAIN_MODEL} (main) is already loaded.")
+            current_model_instance = self.models['main']
+            if isinstance(current_model_instance, ModelClassToLoad) and current_model_instance.model_id == main_model_id_from_config:
+                logger.info(f"{ModelClassToLoad.__name__} for '{main_model_id_from_config}' is already loaded.")
                 return
             else:
-                logger.info(f"Current main model is {type(self.models.get('main'))}, "
-                              f"but config expects {ModelConfig.MAIN_MODEL}. Unloading to load correct model.")
-                self.unload_model('main')
+                logger.info(f"Current main model (type: {type(current_model_instance).__name__}, id: {current_model_instance.model_id}) "
+                              f"does not match configured MAIN_MODEL (type: {ModelClassToLoad.__name__}, id: {main_model_id_from_config}). Unloading to reload.")
+                self.unload_model('main') # Unload a instanței vechi/incorecte
 
         self._clear_gpu_memory()
 
-        ModelClassToLoad = None
-        model_id_to_load = ModelConfig.MAIN_MODEL
-
-        if model_id_to_load == "FLUX.1-dev" and FluxModel is not None:
-            ModelClassToLoad = FluxModel
-            logger.info("Preparing to load FluxModel as main model.")
-        elif model_id_to_load == "HiDream-I1-Fast" and HiDreamModel is not None: # Sau alt ID HiDream
-            ModelClassToLoad = HiDreamModel
-            logger.info("Preparing to load HiDreamModel as main model.")
-        # Adaugă alte modele principale aici
-
-        if ModelClassToLoad is None:
-            logger.error(f"Main model '{model_id_to_load}' is configured, but its class is not available or not imported correctly (FluxModel: {FluxModel is not None}, HiDreamModel: {HiDreamModel is not None}).")
-            return
-
         try:
-            logger.info(f"Instantiating {ModelClassToLoad.__name__} for main model...")
-            # ModelClassToLoad va prelua model_id din ModelConfig.MAIN_MODEL și configurația specifică
-            # (FLUX_CONFIG, HIDREAM_CONFIG etc.) din interiorul constructorului său.
-            inst = ModelClassToLoad() #type: ignore
-            if inst.load(): #type: ignore
+            logger.info(f"Instantiating {ModelClassToLoad.__name__} for main model (id: '{main_model_id_from_config}')...")
+            # Clasa modelului (ex: SDXLInpaintModel) va prelua model_id-ul din ModelConfig.MAIN_MODEL
+            # și configurația sa specifică (ex: SDXL_INPAINT_CONFIG) din interiorul constructorului său.
+            inst = ModelClassToLoad(model_id=main_model_id_from_config) # Pasează explicit model_id-ul
+
+            if inst.load():
                 self.models['main'] = inst
-                logger.info(f"Main model ({ModelClassToLoad.__name__} for '{model_id_to_load}') loaded.")
+                logger.info(f"Main model ({ModelClassToLoad.__name__} for '{main_model_id_from_config}') loaded successfully.")
                 self._log_memory_stats()
             else:
-                logger.error(f"{ModelClassToLoad.__name__} load() failed for main model.")
-                if 'main' in self.models:
+                logger.error(f"{ModelClassToLoad.__name__} load() failed for main model '{main_model_id_from_config}'.")
+                if 'main' in self.models: # Asigură că nu rămâne o instanță eșuată
                     del self.models['main']
-        except ImportError as ie: # Deși importurile sunt sus, o problemă la runtime ar putea apărea
-            logger.error(f"{ModelClassToLoad.__name__} class not found during instantiation. Import error: {ie}", exc_info=True)
         except Exception as e:
-            logger.error(f"Main model ({ModelClassToLoad.__name__}) load error: {e}", exc_info=True)
-            self.unload_model('main')
-
+            logger.error(f"Error during main model ({ModelClassToLoad.__name__} for '{main_model_id_from_config}') load: {e}", exc_info=True)
+            self.unload_model('main') # Asigură curățarea în caz de eroare la instanțiere/load
+    
 
     def load_sam_model(self) -> None:
         logger.debug("Request SAM predictor load...")

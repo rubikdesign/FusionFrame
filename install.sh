@@ -103,17 +103,17 @@ if $CUDA_AVAILABLE; then
   fi
 fi
 # Se instaleaza separat pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-# # Instalează PyTorch cu suport CUDA sau CPU
-# if [ "$PYTORCH_CUDA_VERSION" == "cpu" ]; then
-#   log "Instalez PyTorch CPU..."
-#   pip install torch==2.2.1 torchvision==0.17.1 torchaudio==2.2.1 --index-url https://download.pytorch.org/whl/cpu
-# elif [ "$PYTORCH_CUDA_VERSION" == "cu121" ]; then
-#   log "Instalez PyTorch pentru CUDA 12.1..."
-#   pip install torch==2.2.1 torchvision==0.17.1 torchaudio==2.2.1 --index-url https://download.pytorch.org/whl/cu121
-# else
-#   log "Instalez PyTorch pentru CUDA 11.8..."
-#   pip install torch==2.2.1 torchvision==0.17.1 torchaudio==2.2.1 --index-url https://download.pytorch.org/whl/cu118
-# fi
+# Instalează PyTorch cu suport CUDA sau CPU
+if [ "$PYTORCH_CUDA_VERSION" == "cpu" ]; then
+  log "Instalez PyTorch CPU..."
+  pip install torch==2.2.1 torchvision==0.17.1 torchaudio==2.2.1 --index-url https://download.pytorch.org/whl/cpu
+elif [ "$PYTORCH_CUDA_VERSION" == "cu121" ]; then
+  log "Instalez PyTorch pentru CUDA 12.1..."
+  pip install torch==2.2.1 torchvision==0.17.1 torchaudio==2.2.1 --index-url https://download.pytorch.org/whl/cu121
+else
+  log "Instalez PyTorch pentru CUDA 11.8..."
+  pip install torch==2.2.1 torchvision==0.17.1 torchaudio==2.2.1 --index-url https://download.pytorch.org/whl/cu118
+fi
 
 # Verifică dacă PyTorch a fost instalat cu suport CUDA
 log "Verificare PyTorch cu CUDA..."

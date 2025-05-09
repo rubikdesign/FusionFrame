@@ -29,6 +29,37 @@ class GeneralPipeline(BasePipeline):
         self.post_processor = PostProcessor()
         self.prompt_enhancer = PromptEnhancer()
 
+    def _ensure_dimensions_multiple_of_8(self, image_np_or_pil):
+        """Asigură că dimensiunile imaginii sunt divizibile cu 8."""
+        if isinstance(image_np_or_pil, Image.Image):
+            width, height = image_np_or_pil.size
+            new_width = (width // 8) * 8
+            new_height = (height // 8) * 8
+            
+            # Dacă dimensiunile sunt deja divizibile cu 8, returnăm imaginea originală
+            if width == new_width and height == new_height:
+                return image_np_or_pil
+            
+            # Altfel, redimensionăm imaginea la dimensiunile corecte
+            logger.info(f"Redimensionare imagine de la {width}x{height} la {new_width}x{new_height} pentru a asigura divizibilitatea cu 8")
+            return image_np_or_pil.resize((new_width, new_height), Image.LANCZOS)
+        
+        elif isinstance(image_np_or_pil, np.ndarray):
+            height, width = image_np_or_pil.shape[:2]
+            new_height = (height // 8) * 8
+            new_width = (width // 8) * 8
+            
+            # Dacă dimensiunile sunt deja divizibile cu 8, returnăm imaginea originală
+            if width == new_width and height == new_height:
+                return image_np_or_pil
+            
+            # Altfel, redimensionăm imaginea la dimensiunile corecte
+            logger.info(f"Redimensionare numpy array de la {width}x{height} la {new_width}x{new_height} pentru a asigura divizibilitatea cu 8")
+            return cv2.resize(image_np_or_pil, (new_width, new_height), interpolation=cv2.INTER_LANCZOS4)
+        
+        else:
+            raise ValueError(f"Tip de imagine nesuportat: {type(image_np_or_pil)}")
+
     def process(self,
                 image: Union[Image.Image, np.ndarray],
                 prompt: str,
@@ -57,6 +88,8 @@ class GeneralPipeline(BasePipeline):
 
         try:
             pil_image = self._convert_to_pil(image)
+            # Asigură că dimensiunile sunt divizibile cu 8
+            pil_image = self._ensure_dimensions_multiple_of_8(pil_image)
             image_np = self._convert_to_cv2(pil_image)
         except (TypeError, ValueError) as e:
              msg = f"Input image conversion error: {e}"
@@ -85,9 +118,18 @@ class GeneralPipeline(BasePipeline):
             return {'result_image': pil_image, 'mask_image': None, 'operation': operation, 'message': msg, 'success': False}
 
         mask_np = mask_result.get('mask')
+        # Asigură că masca are dimensiuni divizibile cu 8
+        if mask_np is not None:
+            mask_np = self._ensure_dimensions_multiple_of_8(mask_np)
+            
         mask_pil = self._ensure_pil_mask(mask_np)
         if mask_pil is None: 
             logger.warning("Mask is None after generation.")
+        else:
+            # Asigură că masca și imaginea au aceleași dimensiuni
+            if mask_pil.size != pil_image.size:
+                logger.info(f"Redimensionare mască de la {mask_pil.size} la {pil_image.size} pentru a se potrivi cu imaginea")
+                mask_pil = mask_pil.resize(pil_image.size, Image.NEAREST)
 
         # 4. Îmbunătățire Prompt și Parametri
         self._update_progress(0.6, desc="Pregătire prompt...")
@@ -104,6 +146,12 @@ class GeneralPipeline(BasePipeline):
         )
 
         gen_params = self._get_generation_params(op_type)
+        
+        # Asigură că height și width sunt divizibile cu 8 dacă sunt specificate
+        width, height = pil_image.size
+        effective_width = (width // 8) * 8
+        effective_height = (height // 8) * 8
+        
         final_params = {
             'image': pil_image, 
             'mask_image': mask_pil, 
@@ -114,7 +162,9 @@ class GeneralPipeline(BasePipeline):
             'guidance_scale': guidance_scale if guidance_scale is not None else gen_params['guidance_scale'],
             'controlnet_conditioning_scale': gen_params['controlnet_conditioning_scale'] if use_controlnet_if_available else None,
             'use_refiner': use_refiner_if_available, 
-            'refiner_strength': refiner_strength
+            'refiner_strength': refiner_strength,
+            'height': effective_height,  # Asigură că height este divizibil cu 8
+            'width': effective_width     # Asigură că width este divizibil cu 8
         }
         final_params = {k: v for k, v in final_params.items() if v is not None}
 
@@ -184,7 +234,7 @@ class GeneralPipeline(BasePipeline):
                     'success': False
                  }
         except Exception as e:
-            msg = f"Runtime error during general pipeline: {e}"
+            msg = f"Processing failed: {e}"
             logger.error(msg, exc_info=True)
             return {
                 'result_image': pil_image, 
@@ -216,7 +266,47 @@ class GeneralPipeline(BasePipeline):
                 try:
                     return model.process(**final_params)
                 except Exception as retry_e:
-                    logger.error(f"Recuperarea din OOM a eșuată: {retry_e}")
+                    logger.error(f"Recuperarea din OOM a eșuat: {retry_e}")
                     raise RuntimeError(f"Procesare eșuată după recuperare din OOM: {retry_e}")
             else:
-                raise
+                # Se pare că avem o altă problemă, nu OOM
+                if "have to be divisible by 8" in str(e):
+                    # Avem probleme cu dimensiunile
+                    logger.warning(f"Eroare de dimensiuni: {e}. Încercăm să corectăm...")
+                    
+                    # Ajustăm dimensiunile imaginii și măștii
+                    if 'image' in final_params:
+                        img = final_params['image']
+                        if isinstance(img, Image.Image):
+                            width, height = img.size
+                            new_width = (width // 8) * 8
+                            new_height = (height // 8) * 8
+                            if width != new_width or height != new_height:
+                                logger.info(f"Ajustăm dimensiunile imaginii de la {width}x{height} la {new_width}x{new_height}")
+                                final_params['image'] = img.resize((new_width, new_height), Image.LANCZOS)
+                    
+                    if 'mask_image' in final_params and final_params['mask_image'] is not None:
+                        mask = final_params['mask_image']
+                        if isinstance(mask, Image.Image):
+                            width, height = mask.size
+                            new_width = (width // 8) * 8
+                            new_height = (height // 8) * 8
+                            if width != new_width or height != new_height:
+                                logger.info(f"Ajustăm dimensiunile măștii de la {width}x{height} la {new_width}x{new_height}")
+                                final_params['mask_image'] = mask.resize((new_width, new_height), Image.NEAREST)
+                    
+                    # Ajustăm explicit parametrii height și width
+                    if 'height' in final_params:
+                        final_params['height'] = (final_params['height'] // 8) * 8
+                    if 'width' in final_params:
+                        final_params['width'] = (final_params['width'] // 8) * 8
+                    
+                    # Încercăm din nou
+                    try:
+                        return model.process(**final_params)
+                    except Exception as dim_retry_e:
+                        logger.error(f"Corectarea dimensiunilor a eșuat: {dim_retry_e}")
+                        raise RuntimeError(f"Procesare eșuată după corectarea dimensiunilor: {dim_retry_e}")
+                else:
+                    # Altă eroare
+                    raise

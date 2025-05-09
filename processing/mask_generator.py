@@ -888,7 +888,16 @@ class MaskGenerator:
             # Pregătim inputurile să fie compatibile cu modelul
             for key in inputs:
                 if torch.is_tensor(inputs[key]):
-                    inputs[key] = inputs[key].to(device=device, dtype=model_dtype)
+                    for key in inputs:
+                        if torch.is_tensor(inputs[key]):
+                            if key == "input_ids": # Tratament special pentru input_ids
+                                inputs[key] = inputs[key].to(device=device, dtype=torch.long) # Asigură LongTensor
+                            else:
+                                # Pentru pixel_values și alte posibile inputuri float, folosește model_dtype
+                                if inputs[key].is_floating_point():
+                                    inputs[key] = inputs[key].to(device=device, dtype=model_dtype)
+                                else: # Dacă nu e float (ex: attention_mask care e deja int/long), doar mută pe device
+                                    inputs[key] = inputs[key].to(device=device)
             
             # Rulăm modelul
             with torch.no_grad():
