@@ -23,31 +23,13 @@ class AppConfig:
     # Automatic detection of memory constraints
     if torch.cuda.is_available():
         try:
-            gpu_mem_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            # Automatic settings based on available GPU memory
-            if gpu_mem_gb < 6:  # Less than 6GB VRAM
-                LOW_VRAM_MODE = True
-                FORCE_CPU_FOR_MASK_MODELS = True
-                ENABLE_VAE_TILING = True
-                USE_REFINER = False
-                DISABLE_DEPTH_ESTIMATION = True
-                ANALYZER_LIGHTWEIGHT_MODE = True
-                USE_LIGHTWEIGHT_MODELS = True
-            elif gpu_mem_gb < 10:  # 6-10GB VRAM
-                LOW_VRAM_MODE = True
-                ENABLE_VAE_TILING = True
-                USE_REFINER = False
-                ANALYZER_LIGHTWEIGHT_MODE = True
-                USE_LIGHTWEIGHT_MODELS = True
-                FORCE_CPU_FOR_MASK_MODELS = False
-                DISABLE_DEPTH_ESTIMATION = False
-            else:  # 10GB+ VRAM (high-end GPUs)
-                LOW_VRAM_MODE = False
-                USE_REFINER = True
-                ANALYZER_LIGHTWEIGHT_MODE = False
-                USE_LIGHTWEIGHT_MODELS = False
-                FORCE_CPU_FOR_MASK_MODELS = False
-                DISABLE_DEPTH_ESTIMATION = False
+            LOW_VRAM_MODE = True  # Forțează modul low VRAM
+            FORCE_CPU_FOR_MASK_MODELS = True  # Mută modele de segmentare pe CPU
+            ENABLE_VAE_TILING = True  # Activează tiling pentru VAE
+            USE_REFINER = False  # Dezactivează refinement
+            DISABLE_DEPTH_ESTIMATION = True  # Dezactivează estimarea de adâncime
+            ANALYZER_LIGHTWEIGHT_MODE = True  # Modul lightweight pentru analiză
+            USE_LIGHTWEIGHT_MODELS = True  # Folosește variante mai mici ale modelelor
         except Exception as e:
             # Fallback if GPU detection fails
             logging.warning(f"GPU memory detection failed: {e}. Using conservative memory settings.")

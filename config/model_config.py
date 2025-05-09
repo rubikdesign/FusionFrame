@@ -10,8 +10,8 @@ class ModelConfig:
     """Centralized configuration for AI models and their parameters."""
 
     # --- Main and Backup Models ---
-    MAIN_MODEL = "HiDream-I1-Full"
-    BACKUP_MODEL_NAME = "HiDream-I1-Fast"
+    MAIN_MODEL = "HiDream-I1-Fast"
+    BACKUP_MODEL_NAME = "HiDream-I1-Full"
 
     # --- Lightweight Model Alternatives ---
     # Use these models when in LOW_VRAM_MODE
@@ -34,7 +34,7 @@ class ModelConfig:
     # --- Detailed Configurations for Specific Models ---
 
     # Main Model (HiDream-I1 Full)
-    HIDREAM_CONFIG = {
+    BACKUP_CONFIG = {
         "pretrained_model_name_or_path": "HiDream-ai/HiDream-I1-Full",
         "vae_name_or_path": "stabilityai/sdxl-vae",
         "use_safetensors": True,
@@ -43,7 +43,7 @@ class ModelConfig:
     }
 
     # Backup Model (HiDream-I1 Fast)
-    BACKUP_CONFIG = {
+    HIDREAM_CONFIG = {
         "pretrained_model_name_or_path": "HiDream-ai/HiDream-I1-Fast",
         "vae_name_or_path": "stabilityai/sdxl-vae",
         "use_safetensors": True,
