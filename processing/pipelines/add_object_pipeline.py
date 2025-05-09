@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 from typing import Dict, Any, Union, Callable, Optional
 from PIL import Image
+import time # Adăugat
 
 from processing.pipelines.base_pipeline import BasePipeline
 from processing.analyzer import OperationAnalyzer

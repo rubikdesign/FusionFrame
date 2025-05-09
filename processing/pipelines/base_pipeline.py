@@ -12,7 +12,7 @@ from typing import Dict, Any, Optional, Union, Tuple, Callable
 import numpy as np
 from PIL import Image
 import cv2 # Adăugat pentru funcțiile de conversie
-
+import time # Adăugat
 from config.app_config import AppConfig
 from config.model_config import ModelConfig # Importăm ModelConfig pentru negative_prompt default
 from core.model_manager import ModelManager

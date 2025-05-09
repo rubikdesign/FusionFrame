@@ -591,13 +591,37 @@ class MaskGenerator:
             return m
         except Exception as e: logger.error(f"Morphology error: {e}"); return mask
 
+# În fișierul /workspace/FusionFrame/processing/mask_generator.py
+    # În clasa MaskGenerator
+
     def _dynamic_morphology(self, mask: np.ndarray, img: np.ndarray) -> np.ndarray:
-        # (Cod neschimbat)
-        if mask is None or img is None: return mask; h, w = img.shape[:2]; min_d = min(h,w)
-        close_k=max(3,int((0.015 if min_d>1000 else 0.01)*min_d)//2*2+1)
-        open_k=max(3,int((0.007 if min_d>1000 else 0.005)*min_d)//2*2+1)
-        close_i=3 if min_d>700 else 2; open_i=2 if min_d>700 else 1
-        logger.debug(f"Dynamic morphology: close={close_k}x{close_i}, open={open_k}x{open_i}")
+        if mask is None:
+            logger.debug("Dynamic morphology: Mask is None, returning original mask.")
+            return mask # Returnează masca originală dacă este None
+
+        if img is None:
+            logger.warning("Dynamic morphology: Image is None, cannot perform calculations. Returning original mask.")
+            return mask # Returnează masca originală dacă imaginea este None
+
+        # Asigură că 'img' este un array NumPy valid cu cel puțin 2 dimensiuni
+        if not isinstance(img, np.ndarray) or img.ndim < 2:
+            logger.error(f"Dynamic morphology: Invalid image type or dimensions. Type: {type(img)}, ndim: {getattr(img, 'ndim', 'N/A')}. Returning original mask.")
+            return mask
+
+        try:
+            h, w = img.shape[:2]
+            min_d = min(h, w)
+        except Exception as e:
+            logger.error(f"Dynamic morphology: Error getting image dimensions: {e}. Returning original mask.")
+            return mask
+
+        # Restul logicii originale a funcției
+        close_k = max(3, int((0.015 if min_d > 1000 else 0.01) * min_d) // 2 * 2 + 1)
+        open_k = max(3, int((0.007 if min_d > 1000 else 0.005) * min_d) // 2 * 2 + 1)
+        close_i = 3 if min_d > 700 else 2
+        open_i = 2 if min_d > 700 else 1
+        
+        logger.debug(f"Dynamic morphology: close_k={close_k}, close_i={close_i}, open_k={open_k}, open_i={open_i}, min_d={min_d}")
         return self._morphology(mask, close_k, open_k, close_i, open_i)
 
     def _advanced_edge_refine(self, mask: np.ndarray, img_bgr: np.ndarray) -> np.ndarray:
@@ -630,6 +654,34 @@ class MaskGenerator:
             k_size=max(3,int(0.005*min(img.shape[:2]))//2*2+1); k=cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(k_size,k_size))
             m=cv2.morphologyEx(mask, cv2.MORPH_OPEN, k, iterations=1); m=cv2.morphologyEx(m, cv2.MORPH_CLOSE, k, iterations=1); return m
         except Exception as e: logger.error(f"Basic edge refine error: {e}"); return mask
+
+        # Adaugă această metodă în clasa MaskGenerator (în mask_generator.py)
+
+    def _get_object_detector(self):
+        """
+        Returnează modelul de detecție a obiectelor (ex: YOLO).
+        """
+        yolo_bundle = self.models.get_model("yolo") # Sau alt nume relevant pentru modelul YOLO
+
+        if not yolo_bundle:
+            logger.warning("Object detection model (YOLO) bundle not loaded.")
+            return None
+
+        if not isinstance(yolo_bundle, dict) or 'model' not in yolo_bundle:
+            logger.error("YOLO bundle is not a dictionary or does not contain a 'model' key.")
+            return None
+
+        yolo_model_obj = yolo_bundle.get('model')
+
+        if yolo_model_obj is None:
+            logger.error("The 'model' key in YOLO bundle is None.")
+            return None
+
+        if not hasattr(yolo_model_obj, 'predict'):
+            logger.error("YOLO model object in bundle does not have a 'predict' method.")
+            return None
+            
+        return yolo_model_obj
 
     # --- Helpers de Conversie ---
     def _standardize_input_image(self, image: Union[Image.Image, np.ndarray]) -> Optional[np.ndarray]:
