@@ -1,1 +1,1 @@
-# Pachetul core pentru FusionFrame 2.0
+#Core Package for FusionFrame 2.0

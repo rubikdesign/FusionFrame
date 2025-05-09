@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Manager pentru pipeline-uri de procesare în FusionFrame 2.0
+Manager for processing pipelines in FusionFrame 2.0
 """
 
 import logging
@@ -10,15 +10,15 @@ from typing import Dict, Any, Optional, Callable
 
 from processing.pipelines.base_pipeline import BasePipeline
 
-# Setăm logger-ul
+# Set up logger
 logger = logging.getLogger(__name__)
 
 class PipelineManager:
     """
-    Manager pentru pipeline-uri de procesare
+    Manager for processing pipelines
     
-    Responsabil pentru gestionarea și coordonarea diferitelor pipeline-uri
-    de procesare pentru diverse operații de editare a imaginilor.
+    Responsible for managing and coordinating different processing pipelines
+    for various image editing operations.
     """
     
     _instance = None
@@ -33,7 +33,7 @@ class PipelineManager:
         if self._initialized:
             return
         
-        # Înregistrăm toate pipeline-urile disponibile
+        # Register all available pipelines
         from processing.pipelines.general_pipeline       import GeneralPipeline
         from processing.pipelines.removal_pipeline       import RemovalPipeline
         from processing.pipelines.color_change_pipeline  import ColorChangePipeline
@@ -41,24 +41,24 @@ class PipelineManager:
         from processing.pipelines.background_pipeline    import BackgroundPipeline
         
         self.pipeline_types: Dict[str, BasePipeline] = {}
-        # Registrăm clasele de pipeline
+        # Register pipeline classes
         self.register_pipeline("general_pipeline", GeneralPipeline)
         self.register_pipeline("removal_pipeline", RemovalPipeline)
         self.register_pipeline("color_change_pipeline", ColorChangePipeline)
         self.register_pipeline("add_object_pipeline", AddObjectPipeline)
         self.register_pipeline("background_pipeline", BackgroundPipeline)
 
-        # Aliasuri pentru operation_type
-        # Operații comune mapate la pipeline-uri
+        # Aliases for operation_type
+        # Common operations mapped to pipelines
         self.operation_to_pipeline = {
             "remove":   {"person": "removal_pipeline", "default": "removal_pipeline"},
             "color":    {"hair":   "color_change_pipeline", "default": "color_change_pipeline"},
             "add":      {"default": "add_object_pipeline"},
             "background": {"default": "background_pipeline"},
-            # orice altă operație: va folosi pipeline general
+            # any other operation: will use general pipeline
         }
         
-        # cache pentru instanțele de pipeline
+        # cache for pipeline instances
         self.pipelines: Dict[str, BasePipeline] = {}
         
         self._initialized = True
@@ -66,25 +66,25 @@ class PipelineManager:
     
     def register_pipeline(self, name: str, pipeline_class: BasePipeline) -> None:
         """
-        Înregistrează un tip de pipeline pentru utilizare
+        Register a pipeline type for use
         
         Args:
-            name: Numele pipeline-ului
-            pipeline_class: Clasa de pipeline care va fi instanțiată
+            name: Name of the pipeline
+            pipeline_class: Pipeline class to be instantiated
         """
         self.pipeline_types[name] = pipeline_class
         logger.info(f"Pipeline '{name}' registered successfully")
     
     def get_pipeline(self, name: str, **kwargs) -> Optional[BasePipeline]:
         """
-        Obține o instanță a unui pipeline înregistrat
+        Get an instance of a registered pipeline
         
         Args:
-            name: Numele pipeline-ului
-            **kwargs: Argumente pentru inițializarea pipeline-ului
+            name: Name of the pipeline
+            **kwargs: Arguments for pipeline initialization
         
         Returns:
-            Instanța pipeline-ului sau None dacă pipeline-ul nu există
+            Pipeline instance or None if the pipeline doesn't exist
         """
         if name not in self.pipeline_types:
             logger.warning(f"Pipeline '{name}' not registered")
@@ -98,14 +98,14 @@ class PipelineManager:
     
     def get_pipeline_for_operation(self, operation_type: str, target: str = None) -> Optional[BasePipeline]:
         """
-        Selectează pipeline-ul potrivit pentru tipul de operație
+        Select the appropriate pipeline for the operation type
         
         Args:
-            operation_type: Tipul operației (remove, color, add, background, etc.)
-            target: Ținta operației (opțional)
+            operation_type: Type of operation (remove, color, add, background, etc.)
+            target: Operation target (optional)
         
         Returns:
-            Pipeline-ul potrivit pentru operație sau None dacă niciun pipeline nu este potrivit
+            Appropriate pipeline for the operation or None if no pipeline is suitable
         """
         pipeline_key = None
         mapping = self.operation_to_pipeline.get(operation_type)
@@ -122,22 +122,22 @@ class PipelineManager:
                       operation_type: str = None, target: str = None,
                       progress_callback: Callable = None, **kwargs) -> Dict[str, Any]:
         """
-        Procesează o imagine folosind pipeline-ul potrivit
+        Process an image using the appropriate pipeline
         
         Args:
-            image: Imaginea de procesat
-            prompt: Prompt-ul de editare
-            strength: Intensitatea editării (0.0-1.0)
-            operation_type: Tipul operației (opțional, va fi detectat automat)
-            target: Ținta operației (opțional)
-            progress_callback: Funcție de callback pentru progres
+            image: Image to process
+            prompt: Editing prompt
+            strength: Editing strength (0.0-1.0)
+            operation_type: Operation type (optional, will be auto-detected)
+            target: Operation target (optional)
+            progress_callback: Progress callback function
         
         Returns:
-            Dicționar cu rezultatele procesării:
-                - 'result': Imaginea rezultată
-                - 'mask': Masca utilizată
-                - 'operation': Detalii despre operație
-                - 'message': Mesaj despre procesare
+            Dictionary with processing results:
+                - 'result': Resulting image
+                - 'mask': Used mask
+                - 'operation': Operation details
+                - 'message': Processing message
         """
         from processing.analyzer import OperationAnalyzer
 

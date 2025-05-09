@@ -1,1 +1,1 @@
-# Pachetul de modele pentru FusionFrame 2.0
+# Models Package for FusionFrame 2.0

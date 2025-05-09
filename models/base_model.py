@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Clasă de bază pentru toate modelele AI din FusionFrame 2.0
+Base class for all AI models in FusionFrame 2.0
 """
 
 import torch
@@ -12,24 +12,24 @@ from typing import Dict, Any, Optional, Union
 
 from config.app_config import AppConfig
 
-# Setăm logger-ul
+# Set up logger
 logger = logging.getLogger(__name__)
 
 class BaseModel(ABC):
     """
-    Clasă abstractă de bază pentru toate modelele AI
+    Abstract base class for all AI models
     
-    Toate modelele specifice vor moșteni această clasă și vor
-    implementa metodele abstracte.
+    All specific models will inherit this class and
+    implement the abstract methods.
     """
     
     def __init__(self, model_id: str, device: Optional[str] = None):
         """
-        Inițializare pentru modelul de bază
+        Base model initialization
         
         Args:
-            model_id: Identificatorul modelului
-            device: Dispozitivul pe care va rula modelul (cpu sau cuda)
+            model_id: Model identifier
+            device: Device where the model will run (cpu or cuda)
         """
         self.model_id = model_id
         self.device = device if device else AppConfig.DEVICE
@@ -39,46 +39,46 @@ class BaseModel(ABC):
     @abstractmethod
     def load(self) -> bool:
         """
-        Încarcă modelul în memorie
+        Load model into memory
         
         Returns:
-            True dacă încărcarea a reușit, False altfel
+            True if loading succeeded, False otherwise
         """
         pass
     
     @abstractmethod
     def unload(self) -> bool:
         """
-        Descarcă modelul din memorie
+        Unload model from memory
         
         Returns:
-            True dacă descărcarea a reușit, False altfel
+            True if unloading succeeded, False otherwise
         """
         pass
     
     @abstractmethod
     def process(self, *args, **kwargs) -> Any:
         """
-        Procesează input-ul folosind modelul
+        Process input using the model
         
         Args:
-            *args: Argumentele poziționale
-            **kwargs: Argumentele numite
+            *args: Positional arguments
+            **kwargs: Keyword arguments
             
         Returns:
-            Rezultatul procesării
+            Processing result
         """
         pass
     
     def to(self, device: str) -> 'BaseModel':
         """
-        Mută modelul pe un alt dispozitiv
+        Move model to another device
         
         Args:
-            device: Dispozitivul țintă (cpu sau cuda)
+            device: Target device (cpu or cuda)
             
         Returns:
-            Self, pentru chaining
+            Self, for chaining
         """
         if not self.is_loaded:
             self.device = device
@@ -99,10 +99,10 @@ class BaseModel(ABC):
     
     def get_info(self) -> Dict[str, Any]:
         """
-        Obține informații despre model
+        Get model information
         
         Returns:
-            Dicționar cu informații despre model
+            Dictionary with model information
         """
         return {
             "model_id": self.model_id,

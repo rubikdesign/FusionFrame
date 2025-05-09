@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Implementare pentru suportul ControlNet în FusionFrame 2.0
+ControlNet support implementation for FusionFrame 2.0
 """
 
 import torch
@@ -16,26 +16,26 @@ from config.app_config import AppConfig
 from config.model_config import ModelConfig
 from models.base_model import BaseModel
 
-# Setăm logger-ul
+# Set up logger
 logger = logging.getLogger(__name__)
 
 class ControlNetHandler(BaseModel):
     """
-    Handler pentru interacțiunea cu modelele ControlNet
+    Handler for interacting with ControlNet models
     
-    Responsabil pentru încărcarea și aplicarea modelelor ControlNet
-    pentru a ghida procesul de generare a imaginilor.
+    Responsible for loading and applying ControlNet models
+    to guide the image generation process.
     """
     
     def __init__(self, 
                 model_id: str = ModelConfig.CONTROLNET_CONFIG["model_id"], 
                 device: Optional[str] = None):
         """
-        Inițializare pentru handler-ul ControlNet
+        Initialization for ControlNet handler
         
         Args:
-            model_id: Identificatorul modelului ControlNet 
-            device: Dispozitivul pe care va rula modelul (implicit din AppConfig)
+            model_id: ControlNet model identifier 
+            device: Device where the model will run (default from AppConfig)
         """
         super().__init__(model_id, device)
         
@@ -44,17 +44,17 @@ class ControlNetHandler(BaseModel):
     
     def load(self) -> bool:
         """
-        Încarcă modelul ControlNet
+        Load ControlNet model
         
         Returns:
-            True dacă încărcarea a reușit, False altfel
+            True if loading succeeded, False otherwise
         """
         logger.info(f"Loading ControlNet model '{self.model_id}'")
         
         try:
             from diffusers import ControlNetModel
             
-            # Încarcă modelul
+            # Load model
             self.model = ControlNetModel.from_pretrained(
                 self.model_id,
                 torch_dtype=AppConfig.DTYPE,
@@ -74,19 +74,19 @@ class ControlNetHandler(BaseModel):
     
     def unload(self) -> bool:
         """
-        Descarcă modelul din memorie
+        Unload model from memory
         
         Returns:
-            True dacă descărcarea a reușit, False altfel
+            True if unloading succeeded, False otherwise
         """
         if not self.is_loaded:
             return True
             
         try:
-            # Descarcă modelul
+            # Unload model
             self.model = None
             
-            # Curăță memoria
+            # Clear memory
             torch.cuda.empty_cache()
             
             self.is_loaded = False
@@ -102,15 +102,15 @@ class ControlNetHandler(BaseModel):
                control_mode: str = "canny",
                **kwargs) -> Dict[str, Any]:
         """
-        Procesează imaginea pentru a crea imaginea de control
+        Process image to create control image
         
         Args:
-            image: Imaginea de procesat
-            control_mode: Modul de procesare (canny, depth, normal, etc.)
-            **kwargs: Argumentele adiționale pentru procesare
+            image: Image to process
+            control_mode: Processing mode (canny, depth, normal, etc.)
+            **kwargs: Additional processing arguments
             
         Returns:
-            Dicționar cu imaginea de control rezultată
+            Dictionary with resulting control image
         """
         if not self.is_loaded:
             if not self.load():
@@ -121,13 +121,13 @@ class ControlNetHandler(BaseModel):
                     'message': f"Model '{self.model_id}' failed to load"
                 }
         
-        # Convertim imaginea la numpy array
+        # Convert image to numpy array
         if isinstance(image, Image.Image):
             image_np = np.array(image)
         else:
             image_np = image
         
-        # Procesăm imaginea în funcție de modul selectat
+        # Process image based on selected mode
         try:
             if control_mode == "canny":
                 control_image = self._process_canny(image_np, **kwargs)
@@ -139,7 +139,7 @@ class ControlNetHandler(BaseModel):
                 logger.warning(f"Unknown control mode '{control_mode}'. Using canny as default.")
                 control_image = self._process_canny(image_np, **kwargs)
             
-            # Convertim la PIL pentru compatibilitate cu Diffusers
+            # Convert to PIL for Diffusers compatibility
             if isinstance(control_image, np.ndarray):
                 control_image = Image.fromarray(control_image)
             
@@ -160,64 +160,64 @@ class ControlNetHandler(BaseModel):
     def _process_canny(self, image: np.ndarray, low_threshold: int = 100, 
                       high_threshold: int = 200) -> np.ndarray:
         """
-        Procesează imaginea folosind detectorul de margini Canny
+        Process image using Canny edge detector
         
         Args:
-            image: Imaginea de procesat
-            low_threshold: Pragul inferior pentru Canny
-            high_threshold: Pragul superior pentru Canny
+            image: Image to process
+            low_threshold: Lower threshold for Canny
+            high_threshold: Upper threshold for Canny
             
         Returns:
-            Imaginea de control prelucrată
+            Processed control image
         """
-        # Convertim la tonuri de gri
+        # Convert to grayscale
         if len(image.shape) == 3:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         else:
             gray = image
         
-        # Aplicăm blur pentru a reduce zgomotul
+        # Apply blur to reduce noise
         blurred = cv2.GaussianBlur(gray, (5, 5), 0)
         
-        # Aplicăm detecția de margini Canny
+        # Apply Canny edge detection
         edges = cv2.Canny(blurred, low_threshold, high_threshold)
         
-        # Convertim înapoi la RGB pentru compatibilitate
+        # Convert back to RGB for compatibility
         edges_rgb = cv2.cvtColor(edges, cv2.COLOR_GRAY2RGB)
         
         return edges_rgb
     
     def _process_depth(self, image: np.ndarray, **kwargs) -> np.ndarray:
         """
-        Procesează imaginea pentru control bazat pe hartă de adâncime
+        Process image for depth map-based control
         
         Args:
-            image: Imaginea de procesat
-            **kwargs: Argumentele adiționale pentru procesare
+            image: Image to process
+            **kwargs: Additional processing arguments
             
         Returns:
-            Harta de adâncime pentru imaginea de intrare
+            Depth map for input image
         """
         try:
-            # Importăm biblioteca necesară
+            # Import required library
             from transformers import pipeline
             
-            # Convertim la PIL
+            # Convert to PIL
             image_pil = Image.fromarray(image)
             
-            # Obținem pipeline-ul pentru estimarea adâncimii
+            # Get depth estimation pipeline
             depth_estimator = pipeline("depth-estimation", model="Intel/dpt-large")
             
-            # Calculăm harta de adâncime
+            # Calculate depth map
             depth_result = depth_estimator(image_pil)
             depth_map = depth_result["depth"]
             
-            # Convertim la numpy și ajustăm pentru vizualizare
+            # Convert to numpy and adjust for visualization
             depth_np = np.array(depth_map)
             depth_np = (depth_np - depth_np.min()) / (depth_np.max() - depth_np.min()) * 255
             depth_np = depth_np.astype(np.uint8)
             
-            # Convertim la RGB
+            # Convert to RGB
             depth_rgb = cv2.cvtColor(depth_np, cv2.COLOR_GRAY2RGB)
             
             return depth_rgb
@@ -232,45 +232,45 @@ class ControlNetHandler(BaseModel):
     
     def _process_normal(self, image: np.ndarray, **kwargs) -> np.ndarray:
         """
-        Procesează imaginea pentru control bazat pe harta normală
+        Process image for normal map-based control
         
         Args:
-            image: Imaginea de procesat
-            **kwargs: Argumentele adiționale pentru procesare
+            image: Image to process
+            **kwargs: Additional processing arguments
             
         Returns:
-            Harta normală pentru imaginea de intrare
+            Normal map for input image
         """
         try:
-            # Importăm biblioteca necesară
+            # Import required library
             from transformers import pipeline
             
-            # Convertim la PIL
+            # Convert to PIL
             image_pil = Image.fromarray(image)
             
-            # Obținem pipeline-ul pentru estimarea normală
+            # Get normal estimation pipeline
             normal_estimator = pipeline("depth-estimation", model="Intel/dpt-hybrid-midas")
             
-            # Calculăm harta normală din harta de adâncime
+            # Calculate normal map from depth map
             depth_result = normal_estimator(image_pil)
             depth_map = depth_result["depth"]
             
-            # Convertim la numpy
+            # Convert to numpy
             depth_np = np.array(depth_map)
             
-            # Calculăm gradienții pentru a obține harta normală
+            # Calculate gradients to get normal map
             sobelx = cv2.Sobel(depth_np, cv2.CV_64F, 1, 0, ksize=3)
             sobely = cv2.Sobel(depth_np, cv2.CV_64F, 0, 1, ksize=3)
             
-            # Normalizăm gradienții
+            # Normalize gradients
             sobelx = cv2.normalize(sobelx, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
             sobely = cv2.normalize(sobely, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
             
-            # Combinăm în harta normală RGB
+            # Combine into RGB normal map
             normal_map = np.zeros((depth_np.shape[0], depth_np.shape[1], 3), dtype=np.uint8)
-            normal_map[:, :, 0] = sobelx  # R canal
-            normal_map[:, :, 1] = sobely  # G canal
-            normal_map[:, :, 2] = 255  # B canal (constanta)
+            normal_map[:, :, 0] = sobelx  # R channel
+            normal_map[:, :, 1] = sobely  # G channel
+            normal_map[:, :, 2] = 255  # B channel (constant)
             
             return normal_map
             

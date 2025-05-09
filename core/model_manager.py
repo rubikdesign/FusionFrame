@@ -2,8 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Manager pentru modelele AI folosite în FusionFrame 2.0
-(Versiune Finală - Include SAM Predictor - Corectat SyntaxError)
+Ai Models Manager used in FusionFrame 2.0
 """
 
 import os
@@ -16,7 +15,7 @@ from tqdm.auto import tqdm
 from pathlib import Path
 from typing import Optional, Dict, Any, Union
 
-# Import BaseModel local (cu fallback)
+# Import BaseModel local (with fallback)
 try:
     from models.base_model import BaseModel
 except ImportError:
@@ -25,7 +24,7 @@ except ImportError:
 from config.app_config import AppConfig
 from config.model_config import ModelConfig
 
-# Importuri Transformers (cu fallback)
+# Imports Transformers (with fallback)
 try:
     from transformers import (
         AutoImageProcessor, AutoModelForImageClassification, AutoModelForDepthEstimation
@@ -36,7 +35,7 @@ except ImportError:
     AutoImageProcessor, AutoModelForImageClassification, AutoModelForDepthEstimation = None, None, None
     TRANSFORMERS_AVAILABLE = False
 
-# Importuri pentru SAM Predictor (cu fallback)
+# SAM Predictor Imports (with fallback)
 try:
     from segment_anything import sam_model_registry, SamPredictor
     SAM_AVAILABLE = True
@@ -159,7 +158,7 @@ class ModelManager:
                 logger.debug(f"SAM .pth found: {chk_path}")  # Changed to debug
         return assets_dir
 
-    # --- Metode de Încărcare Specifice ---
+    # --- Start upload specific methods ---
     def load_main_model(self) -> None:
         logger.debug("Request main model load...")
         if 'main' in self.models and isinstance(self.models.get('main'), BaseModel) and self.models['main'].is_loaded:
@@ -343,7 +342,7 @@ class ModelManager:
             logger.error(f"DepthEst load error: {e}", exc_info=True)
             return None
 
-    # --- Metode de Gestionare ---
+ 
     def load_all_models(self) -> None:
         logger.info("Loading/Checking essential models (main, sam_predictor, clipseg)...")
         self.get_model('main')

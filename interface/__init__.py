@@ -1,1 +1,1 @@
-# Pachetul de interfață pentru FusionFrame 2.0
+# INterface Package for FusionFrame 2.0

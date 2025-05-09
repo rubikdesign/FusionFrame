@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Componente pentru interfața Gradio în FusionFrame 2.0
+Gradio interface components for FusionFrame 2.0
 """
 
 import gradio as gr
@@ -12,18 +12,18 @@ from config.app_config import AppConfig
 
 def create_examples() -> List[List[Any]]:
     """
-    Creează lista de exemple pentru interfață
+    Create the list of examples for the interface
     
     Returns:
-        Lista de exemple
+        List of examples
     """
     examples = [
-        # Operații de bază
+        # Basic operations
         ["remove the car from the street", 0.8],
         ["change hair color to bright pink", 0.7],
         ["replace background with futuristic city", 0.85],
         ["remove watermark from top right corner", 0.75],
-        # Exemple avansate adiționale
+        # Additional advanced examples
         ["remove person from the image", 0.9],
         ["change the shirt color to blue", 0.65],
         ["replace the sky with sunset colors", 0.8],
@@ -37,10 +37,10 @@ def create_examples() -> List[List[Any]]:
 
 def create_advanced_settings_panel() -> List[gr.components.Component]:
     """
-    Creează panoul de setări avansate
+    Create the advanced settings panel
     
     Returns:
-        Lista de componente Gradio
+        List of Gradio components
     """
     with gr.Row():
         num_steps = gr.Slider(
@@ -82,7 +82,7 @@ def create_advanced_settings_panel() -> List[gr.components.Component]:
             info="Use ControlNet for better guidance (disable for lower VRAM usage)"
         )
     
-    # Adăugăm controalele pentru refiner
+    # Add refiner controls
     with gr.Row():
         use_refiner = gr.Checkbox(
             value=AppConfig.USE_REFINER, 
@@ -99,7 +99,7 @@ def create_advanced_settings_panel() -> List[gr.components.Component]:
             visible=AppConfig.USE_REFINER
         )
     
-    # Facem ca refiner_strength să fie vizibil doar când use_refiner este activat
+    # Make refiner_strength visible only when use_refiner is enabled
     use_refiner.change(
         fn=lambda x: {"visible": x},
         inputs=[use_refiner],

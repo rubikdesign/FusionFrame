@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Manager pentru resursele și memoria în FusionFrame 2.0
+Manager for resources and memory in FusionFrame 2.0
 """
 
 import os
@@ -14,15 +14,15 @@ from typing import Dict, Any, Optional
 
 from config.app_config import AppConfig
 
-# Setăm logger-ul
+# Set up logger
 logger = logging.getLogger(__name__)
 
 class ResourceManager:
     """
-    Manager pentru resursele și memoria
+    Manager for resources and memory
     
-    Responsabil pentru monitorizarea și optimizarea utilizării resurselor
-    și memoriei pentru a asigura performanța optimă a aplicației.
+    Responsible for monitoring and optimizing resource and memory usage
+    to ensure optimal application performance.
     """
     
     _instance = None
@@ -47,10 +47,10 @@ class ResourceManager:
     
     def get_system_info(self) -> Dict[str, Any]:
         """
-        Obține informații despre sistem și resurse
+        Get system and resource information
         
         Returns:
-            Dicționar cu informații despre sistem
+            Dictionary with system information
         """
         info = {
             "cpu": {
@@ -72,7 +72,7 @@ class ResourceManager:
             }
         }
         
-        # Adăugăm informații despre GPU dacă este disponibil
+        # Add GPU information if available
         if torch.cuda.is_available():
             info["gpu"] = {
                 "name": torch.cuda.get_device_name(0),
@@ -85,19 +85,19 @@ class ResourceManager:
     
     def get_gpu_memory_usage(self) -> int:
         """
-        Obține utilizarea curentă a memoriei GPU
+        Get current GPU memory usage
         
         Returns:
-            Memoria utilizată în bytes
+            Memory used in bytes
         """
         if not torch.cuda.is_available():
             return 0
             
-        # Obținem memoria utilizată
+        # Get used memory
         memory_allocated = torch.cuda.memory_allocated()
         memory_reserved = torch.cuda.memory_reserved()
         
-        # Actualizăm valorile curente și de vârf
+        # Update current and peak values
         self.current_gpu_memory = memory_allocated
         self.peak_gpu_memory = max(self.peak_gpu_memory, memory_allocated)
         
@@ -105,36 +105,36 @@ class ResourceManager:
     
     def optimize_memory(self, threshold_percent: float = 90.0) -> bool:
         """
-        Optimizează utilizarea memoriei dacă depășește un anumit prag
+        Optimize memory usage if it exceeds a certain threshold
         
         Args:
-            threshold_percent: Pragul procentual pentru declanșarea optimizării
+            threshold_percent: Percentage threshold for triggering optimization
             
         Returns:
-            True dacă optimizarea a fost efectuată, False altfel
+            True if optimization was performed, False otherwise
         """
-        # Verificăm utilizarea RAM
+        # Check RAM usage
         ram_percent = psutil.virtual_memory().percent
         
-        # Verificăm utilizarea GPU dacă este disponibilă
+        # Check GPU usage if available
         gpu_percent = 0
         if torch.cuda.is_available():
             total_memory = torch.cuda.get_device_properties(0).total_memory
             used_memory = self.get_gpu_memory_usage()
             gpu_percent = (used_memory / total_memory) * 100
         
-        # Dacă oricare depășește pragul, optimizăm memoria
+        # If either exceeds the threshold, optimize memory
         if ram_percent > threshold_percent or gpu_percent > threshold_percent:
             logger.info(f"Memory usage high: RAM {ram_percent}%, GPU {gpu_percent}%. Optimizing...")
             
-            # Curățăm memoria neutilizată
+            # Clean up unused memory
             gc.collect()
             
-            # Curățăm cache-ul CUDA dacă e disponibil
+            # Clear CUDA cache if available
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
             
-            # Verificăm din nou utilizarea
+            # Check usage again
             new_ram_percent = psutil.virtual_memory().percent
             new_gpu_percent = 0
             if torch.cuda.is_available():
@@ -148,75 +148,75 @@ class ResourceManager:
     
     def should_use_tiling(self, image_size: tuple) -> bool:
         """
-        Determină dacă ar trebui să folosim tiling pentru procesarea imaginii
+        Determine whether to use tiling for image processing
         
         Args:
-            image_size: Dimensiunea imaginii (width, height)
+            image_size: Image dimensions (width, height)
             
         Returns:
-            True dacă ar trebui să folosim tiling, False altfel
+            True if tiling should be used, False otherwise
         """
         width, height = image_size
         
-        # Calculăm numărul de pixeli
+        # Calculate number of pixels
         num_pixels = width * height
         
-        # Pragul pentru tiling
+        # Tiling threshold
         tiling_threshold = 1024 * 1024  # 1 megapixel
         
-        # Verificăm dacă memoria GPU este limitată
+        # Check if GPU memory is limited
         if torch.cuda.is_available():
             free_memory = torch.cuda.get_device_properties(0).total_memory - self.get_gpu_memory_usage()
-            # Dacă memoria liberă este sub 2 GB, folosim tiling indiferent de dimensiune
+            # If free memory is below 2 GB, use tiling regardless of size
             if free_memory < 2 * 1024 * 1024 * 1024:
                 return True
         
-        # Decizie bazată pe numărul de pixeli
+        # Decision based on number of pixels
         return num_pixels > tiling_threshold
     
     def estimate_memory_requirements(self, operation_type: str, image_size: tuple) -> Dict[str, Any]:
         """
-        Estimează cerințele de memorie pentru o operație
+        Estimate memory requirements for an operation
         
         Args:
-            operation_type: Tipul operației
-            image_size: Dimensiunea imaginii
+            operation_type: Type of operation
+            image_size: Image dimensions
             
         Returns:
-            Dicționar cu estimările de memorie
+            Dictionary with memory estimates
         """
         width, height = image_size
         num_pixels = width * height
         
         # Memory constants (bytes per pixel)
-        BASE_MEMORY_PER_PIXEL = 20  # Aproximativ pentru o imagine în memorie
+        BASE_MEMORY_PER_PIXEL = 20  # Approximate for an in-memory image
         
-        # Estimări de bază
+        # Base estimates
         base_memory = num_pixels * BASE_MEMORY_PER_PIXEL
         
-        # Factori de multiplicare pentru diferite operații
+        # Multiplication factors for different operations
         operation_factors = {
-            "remove": 3.0,      # Necesită mai multă memorie pentru reconstrucție
-            "color": 1.5,       # Schimbările de culoare sunt mai simple
-            "add": 2.0,         # Adăugarea obiectelor necesită memorie moderată
-            "background": 2.5,  # Înlocuirea fundalului necesită mai multă memorie
-            "default": 2.0      # Factor implicit
+            "remove": 3.0,      # Requires more memory for reconstruction
+            "color": 1.5,       # Color changes are simpler
+            "add": 2.0,         # Adding objects requires moderate memory
+            "background": 2.5,  # Background replacement requires more memory
+            "default": 2.0      # Default factor
         }
         
-        # Obținem factorul pentru operație
+        # Get factor for operation
         factor = operation_factors.get(operation_type, operation_factors["default"])
         
-        # Calculăm estimarea finală
+        # Calculate final estimate
         estimated_memory = base_memory * factor
         
-        # Verificăm disponibilitatea memoriei
+        # Check memory availability
         available_memory = 0
         if torch.cuda.is_available():
             available_memory = torch.cuda.get_device_properties(0).total_memory - self.get_gpu_memory_usage()
         else:
             available_memory = psutil.virtual_memory().available
         
-        # Rezultatul estimării
+        # Estimation result
         return {
             "estimated_bytes": estimated_memory,
             "estimated_mb": estimated_memory / (1024 * 1024),

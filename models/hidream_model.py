@@ -2,9 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-Implementare pentru modelul HiDream în FusionFrame 2.0 (Versiune Corectată)
+Implementation for HiDream model in FusionFrame 2.0 (Corrected Version)
 
-Notă: Modelele HiDream necesită o versiune recentă de diffusers instalată din sursă:
+Note: HiDream models require a recent version of diffusers installed from source:
 pip install git+https://github.com/huggingface/diffusers.git
 """
 
@@ -19,28 +19,28 @@ from config.app_config import AppConfig
 from config.model_config import ModelConfig
 from models.base_model import BaseModel
 
-# Importuri necesare pentru HiDream-I1 și Diffusers
-from transformers import LlamaForCausalLM, PreTrainedTokenizerFast # Pentru text encoders HiDream-I1
+# Required imports for HiDream-I1 and Diffusers
+from transformers import LlamaForCausalLM, PreTrainedTokenizerFast # For HiDream-I1 text encoders
 from diffusers import (
     AutoencoderKL,
     ControlNetModel,
-    DiffusionPipeline, # Folosit ca fallback
-    FlowMatchEulerDiscreteScheduler, # Scheduler recomandat pentru HiDream
-    StableDiffusionXLImg2ImgPipeline # Pentru SDXL Refiner
+    DiffusionPipeline, # Used as fallback
+    FlowMatchEulerDiscreteScheduler, # Recommended scheduler for HiDream
+    StableDiffusionXLImg2ImgPipeline # For SDXL Refiner
 )
-# HiDreamImageTransformer2DModel este de obicei o componentă internă a pipeline-ului HiDream
-# sau poate fi încărcat separat dacă structura HiDream o cere specific.
+# HiDreamImageTransformer2DModel is typically an internal component of the HiDream pipeline
+# or can be loaded separately if the HiDream structure specifically requires it.
 
-# Setăm logger-ul
+# Set up logger
 logger = logging.getLogger(__name__)
 
 class HiDreamModel(BaseModel):
     """
-    Wrapper pentru modelul HiDream-I1 cu refiner opțional.
-    La prima încărcare, modelele vor fi descărcate automat dacă nu sunt prezente local.
+    Wrapper for HiDream-I1 model with optional refiner.
+    On first load, models will be automatically downloaded if not present locally.
     
-    Modelele HiDream necesită a fi încărcate cu modelul Llama pentru a funcționa corect.
-    Asigurați-vă că aveți acces la "meta-llama/Meta-Llama-3.1-8B-Instruct".
+    HiDream models require Llama model to be loaded to work correctly.
+    Ensure you have access to "meta-llama/Meta-Llama-3.1-8B-Instruct".
     """
     def __init__(
         self,
@@ -49,7 +49,7 @@ class HiDreamModel(BaseModel):
         use_refiner: Optional[bool] = None,
     ):
         super().__init__(model_id, device)
-        # Adăugăm explicit is_loaded pentru a preveni erorile de atribut
+        # Explicitly add is_loaded to prevent attribute errors
         self.is_loaded = False
         
         self.config = ModelConfig.HIDREAM_CONFIG
@@ -60,18 +60,18 @@ class HiDreamModel(BaseModel):
 
         self.vae = None
         self.controlnet = None
-        self.pipeline = None # Tipul de bază pentru pipeline
-        self.refiner_pipeline = None # Pentru SDXL Refiner
-        self.lora_weights = [] # Pentru a ține evidența LoRA-urilor încărcate
-        self.text_encoder_4 = None # Specific pentru HiDream-I1 (Llama)
-        self.tokenizer_4 = None    # Specific pentru HiDream-I1 (Llama)
+        self.pipeline = None # Base type for pipeline
+        self.refiner_pipeline = None # For SDXL Refiner
+        self.lora_weights = [] # To track loaded LoRAs
+        self.text_encoder_4 = None # Specific to HiDream-I1 (Llama)
+        self.tokenizer_4 = None    # Specific to HiDream-I1 (Llama)
 
     def load(self) -> bool:
         logger.info(f"Loading HiDream model '{self.model_id}' with refiner={self.use_refiner}")
-        PipelineClass = DiffusionPipeline # Inițializare cu fallback
+        PipelineClass = DiffusionPipeline # Initialize with fallback
 
         try:
-            # Încercăm să importăm clasa specifică HiDream
+            # Try to import specific HiDream class
             from diffusers.pipelines.hidream_image.pipeline_hidream_image import HiDreamImagePipeline
             PipelineClass = HiDreamImagePipeline
             logger.info("Successfully imported HiDreamImagePipeline.")
@@ -84,7 +84,7 @@ class HiDreamModel(BaseModel):
                 f"Please install diffusers from source with: pip install git+https://github.com/huggingface/diffusers.git"
             )
             has_hidream_specific_pipeline = False
-            # Dacă model_id este specific HiDream și nu avem pipeline-ul, ar trebui să considerăm o eroare?
+            # If model_id is specific HiDream and we don't have the pipeline, should we consider it an error?
             if "HiDream-ai/" in self.config.get("pretrained_model_name_or_path", ""):
                  logger.error(f"Model {self.model_id} seems to be a HiDream model, but HiDreamImagePipeline could not be imported. Critical error.")
                  self.is_loaded = False
@@ -92,7 +92,7 @@ class HiDreamModel(BaseModel):
 
 
         try:
-            # 1. Încarcă VAE
+            # 1. Load VAE
             logger.info(f"Loading VAE from {self.config['vae_name_or_path']}...")
             self.vae = AutoencoderKL.from_pretrained(
                 self.config["vae_name_or_path"],
@@ -101,7 +101,7 @@ class HiDreamModel(BaseModel):
             ).to(self.device)
             logger.info("VAE loaded successfully.")
 
-            # 2. Încarcă ControlNet dacă e configurat
+            # 2. Load ControlNet if configured
             if ModelConfig.CONTROLNET_CONFIG and ModelConfig.CONTROLNET_CONFIG.get("model_id"):
                 logger.info(f"Loading ControlNet from {ModelConfig.CONTROLNET_CONFIG['model_id']}...")
                 try:
@@ -120,12 +120,12 @@ class HiDreamModel(BaseModel):
                 logger.info("ControlNet not configured or model_id missing.")
                 self.controlnet = None
 
-            # 3. Încarcă Text Encoders specifici pentru HiDream-I1 (Llama)
-            # Acestea sunt necesare DOAR dacă folosim HiDreamImagePipeline
+            # 3. Load specific Text Encoders for HiDream-I1 (Llama)
+            # These are needed ONLY if using HiDreamImagePipeline
             if has_hidream_specific_pipeline and "HiDream-ai/HiDream-I1" in self.config.get("pretrained_model_name_or_path", ""):
                 try:
-                    # Numele modelului Llama ar trebui să fie configurabil sau dedus
-                    llama_model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct" # Asigurați-vă că acesta este corect
+                    # Llama model name should be configurable or inferred
+                    llama_model_name = "meta-llama/Meta-Llama-3.1-8B-Instruct" # Ensure this is correct
                     logger.info(f"Loading Llama tokenizer_4 from {llama_model_name} for HiDream-I1...")
                     self.tokenizer_4 = PreTrainedTokenizerFast.from_pretrained(
                         llama_model_name, cache_dir=AppConfig.CACHE_DIR
@@ -133,9 +133,9 @@ class HiDreamModel(BaseModel):
                     logger.info(f"Loading Llama text_encoder_4 from {llama_model_name} for HiDream-I1...")
                     self.text_encoder_4 = LlamaForCausalLM.from_pretrained(
                         llama_model_name,
-                        output_hidden_states=True,  # Necesar pentru HiDream
-                        output_attentions=True,     # Necesar pentru HiDream
-                        torch_dtype=AppConfig.DTYPE, # sau torch.bfloat16 dacă e suportat și preferat
+                        output_hidden_states=True,  # Required for HiDream
+                        output_attentions=True,     # Required for HiDream
+                        torch_dtype=AppConfig.DTYPE, # or torch.bfloat16 if supported and preferred
                         cache_dir=AppConfig.CACHE_DIR,
                     ).to(self.device)
                     
@@ -143,14 +143,14 @@ class HiDreamModel(BaseModel):
                 except Exception as e_llama:
                     logger.error(f"Failed to load Llama text encoder/tokenizer for HiDream-I1: {e_llama}. "
                                  "HiDream-I1 pipeline might not function correctly.", exc_info=True)
-                    # Acest lucru este probabil critic pentru HiDream-I1
+                    # This is likely critical for HiDream-I1
                     self.is_loaded = False
                     return False
 
-            # 4. Încarcă pipeline-ul principal
+            # 4. Load main pipeline
             logger.info(f"Loading main pipeline '{self.config['pretrained_model_name_or_path']}' using {PipelineClass.__name__}...")
             
-            # Pregătim parametrii pentru pipeline
+            # Prepare pipeline parameters
             pipeline_kwargs = {
                 "vae": self.vae,
                 "torch_dtype": AppConfig.DTYPE,
@@ -158,7 +158,7 @@ class HiDreamModel(BaseModel):
                 "cache_dir": AppConfig.CACHE_DIR,
             }
             
-            # Adăugăm tokenizer_4 și text_encoder_4 dacă sunt disponibile
+            # Add tokenizer_4 and text_encoder_4 if available
             if self.tokenizer_4 and self.text_encoder_4:
                 pipeline_kwargs["tokenizer_4"] = self.tokenizer_4
                 pipeline_kwargs["text_encoder_4"] = self.text_encoder_4
@@ -172,17 +172,17 @@ class HiDreamModel(BaseModel):
             )
             logger.info("Main pipeline loaded successfully.")
 
-            # 5. Optimizări VRAM (după încărcarea pipeline-ului)
-            if self.pipeline: # Verificăm dacă pipeline-ul a fost încărcat
+            # 5. VRAM optimizations (after loading pipeline)
+            if self.pipeline: # Verify pipeline was loaded
                 if AppConfig.LOW_VRAM_MODE:
                     logger.info("Enabling model CPU offload for main pipeline.")
                     self.pipeline.enable_model_cpu_offload()
                     
-                    # Activăm secționarea și pavajul VAE pentru a economisi memorie
+                    # Enable VAE slicing to save memory
                     logger.info("Enabling VAE slicing for memory optimization.")
                     self.pipeline.enable_vae_slicing()
                     
-                    # Opțional activează pavajul pentru imagini foarte mari
+                    # Optionally enable tiling for very large images
                     if hasattr(AppConfig, 'ENABLE_VAE_TILING') and AppConfig.ENABLE_VAE_TILING:
                         logger.info("Enabling VAE tiling for large images.")
                         self.pipeline.enable_vae_tiling()
@@ -190,10 +190,10 @@ class HiDreamModel(BaseModel):
                     logger.info("Moving main pipeline to device.")
                     self.pipeline.to(self.device)
 
-                # 6. Configurează scheduler optimizat
+                # 6. Configure optimized scheduler
                 logger.info("Configuring FlowMatchEulerDiscreteScheduler for main pipeline.")
-                # Folosim FlowMatchEulerDiscreteScheduler în loc de DPMSolverMultistepScheduler
-                # deoarece acesta este planificatorul recomandat pentru HiDream
+                # Use FlowMatchEulerDiscreteScheduler instead of DPMSolverMultistepScheduler
+                # because this is the recommended scheduler for HiDream
                 try:
                     self.pipeline.scheduler = FlowMatchEulerDiscreteScheduler.from_config(
                         self.pipeline.scheduler.config,
@@ -208,12 +208,12 @@ class HiDreamModel(BaseModel):
                 return False
 
 
-            # 7. Încarcă Refiner Pipeline (dacă este activat și configurat)
+            # 7. Load Refiner Pipeline (if enabled and configured)
             if self.use_refiner and self.refiner_config.get("pretrained_model_name_or_path"):
                 logger.info(f"Loading Refiner pipeline from {self.refiner_config['pretrained_model_name_or_path']}...")
                 try:
-                    # VAE-ul poate fi refolosit sau se poate încărca unul specific refiner-ului dacă este necesar
-                    refiner_vae = self.vae # Refolosim VAE-ul principal
+                    # VAE can be reused or a refiner-specific one can be loaded if needed
+                    refiner_vae = self.vae # Reuse main VAE
                     # refiner_vae = AutoencoderKL.from_pretrained(self.refiner_config["vae_name_or_path"] or self.config["vae_name_or_path"], torch_dtype=AppConfig.DTYPE).to(self.device)
 
                     self.refiner_pipeline = StableDiffusionXLImg2ImgPipeline.from_pretrained(
@@ -228,7 +228,7 @@ class HiDreamModel(BaseModel):
                         logger.info("Enabling model CPU offload for refiner pipeline.")
                         self.refiner_pipeline.enable_model_cpu_offload()
                         
-                        # Activăm optimizările VAE și pentru refiner
+                        # Enable VAE optimizations for refiner too
                         self.refiner_pipeline.enable_vae_slicing()
                         if hasattr(AppConfig, 'ENABLE_VAE_TILING') and AppConfig.ENABLE_VAE_TILING:
                             self.refiner_pipeline.enable_vae_tiling()
@@ -247,11 +247,11 @@ class HiDreamModel(BaseModel):
                 self.refiner_pipeline = None
 
 
-            # 8. Încarcă LoRA-urile configurate (dacă pipeline-ul principal există)
+            # 8. Load configured LoRAs (if main pipeline exists)
             if self.pipeline and self.config.get("lora_weights"):
                 self._load_loras()
 
-            self.model = self.pipeline # Modelul principal este pipeline-ul
+            self.model = self.pipeline # Main model is the pipeline
             self.is_loaded = True
             logger.info(f"HiDream model '{self.model_id}' and components loaded successfully.")
             return True
@@ -268,7 +268,7 @@ class HiDreamModel(BaseModel):
             return False
 
     def _load_loras(self) -> None:
-        """Încarcă LoRA-urile configurate în pipeline-ul principal."""
+        """Load configured LoRAs into the main pipeline."""
         if not self.pipeline:
             logger.warning("Main pipeline not loaded, cannot load LoRAs.")
             return
@@ -285,12 +285,12 @@ class HiDreamModel(BaseModel):
             
             logger.info(f"Loading LoRA '{lora_name}' from path '{lora_path}' with weight_name '{weight_name}'.")
             try:
-                # load_lora_weights poate fi direct pe pipeline sau pe unet/text_encoder
-                # Pentru Diffusers >0.17, este direct pe pipeline
+                # load_lora_weights can be directly on pipeline or on unet/text_encoder
+                # For Diffusers >0.17, it's directly on pipeline
                 self.pipeline.load_lora_weights(
-                    lora_path, # Poate fi un director sau un fișier .safetensors
-                    weight_name=weight_name, # Numele fișierului specific în director, dacă lora_path e un director
-                    adapter_name=lora_name # Nume intern pentru adapter
+                    lora_path, # Can be a directory or .safetensors file
+                    weight_name=weight_name, # Specific filename in directory if lora_path is a directory
+                    adapter_name=lora_name # Internal name for adapter
                 )
                 
                 self.lora_weights.append(lora_info)
@@ -299,8 +299,8 @@ class HiDreamModel(BaseModel):
                 logger.warning(f"Could not load LoRA '{lora_name}' from '{lora_path}': {e_lora}", exc_info=True)
         
         if self.lora_weights:
-             # După încărcarea tuturor LoRA-urilor, setăm ce adaptoare sunt active și cu ce greutăți
-             # Exemplu: activăm toate LoRA-urile încărcate cu greutățile specificate (default 1.0)
+             # After loading all LoRAs, set which adapters are active and with what weights
+             # Example: activate all loaded LoRAs with specified weights (default 1.0)
             active_adapters = [lora.get("name", os.path.basename(lora.get("path"))) for lora in self.lora_weights]
             adapter_weights = [lora.get("weight", 1.0) for lora in self.lora_weights]
             try:
@@ -333,7 +333,7 @@ class HiDreamModel(BaseModel):
         self.refiner_pipeline = None
         self.text_encoder_4 = None
         self.tokenizer_4 = None
-        self.model = None # Asigurăm că și self.model este curățat
+        self.model = None # Ensure self.model is also cleaned
         
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -355,20 +355,20 @@ class HiDreamModel(BaseModel):
         controlnet_conditioning_scale: Optional[float] = None,
         refiner_strength: Optional[float] = None,
         seed: int = 42,
-        **kwargs, # Permite pasarea altor parametri specifici pipeline-ului
+        **kwargs, # Allows passing other pipeline-specific parameters
     ) -> Dict[str, Any]:
         if not self.is_loaded:
             logger.warning("Model not loaded. Attempting to load...")
             if not self.load():
                 return {"result": image, "success": False, "message": "Model failed to load on demand."}
         
-        if not self.pipeline: # Verificare suplimentară
+        if not self.pipeline: # Additional check
              return {"result": image, "success": False, "message": "Main pipeline is not available."}
 
         image_pil = Image.fromarray(image) if isinstance(image, np.ndarray) else image.convert("RGB")
         mask_pil = Image.fromarray(mask_image) if isinstance(mask_image, np.ndarray) else mask_image.convert("L")
 
-        # Asigurăm că seed-ul este configurat corect
+        # Ensure seed is correctly configured
         gen = torch.Generator(device=self.device).manual_seed(seed)
         
         effective_num_inference_steps = (
@@ -381,7 +381,7 @@ class HiDreamModel(BaseModel):
         
         effective_negative_prompt = negative_prompt if negative_prompt is not None else ModelConfig.GENERATION_PARAMS.get("negative_prompt", "")
 
-        # Pregătim argumentele pentru pipeline
+        # Prepare pipeline arguments
         pipeline_args = {
             "prompt": prompt,
             "negative_prompt": effective_negative_prompt,
@@ -389,16 +389,16 @@ class HiDreamModel(BaseModel):
             "mask_image": mask_pil,
             "num_inference_steps": effective_num_inference_steps,
             "guidance_scale": guidance_scale,
-            "strength": strength, # Pentru img2img / inpainting
+            "strength": strength, # For img2img / inpainting
             "generator": gen,
         }
 
         if self.controlnet and controlnet_conditioning_scale is not None:
-            # Pentru ControlNet, adăugăm parametrii specifici
+            # For ControlNet, add specific parameters
             pipeline_args["controlnet_conditioning_scale"] = controlnet_conditioning_scale
             logger.info(f"Using ControlNet with scale: {controlnet_conditioning_scale}")
 
-        # Adăugăm kwargs la argumentele pipeline-ului, permițând flexibilitate
+        # Add kwargs to pipeline arguments, allowing flexibility
         pipeline_args.update(kwargs)
 
         try:
@@ -408,25 +408,25 @@ class HiDreamModel(BaseModel):
 
             if self.use_refiner and self.refiner_pipeline:
                 logger.info(f"Applying Refiner. Strength: {effective_refiner_strength}")
-                # Pentru refiner, strength are un alt sens (cât de mult să modifice imaginea de la base)
-                # Numărul de pași pentru refiner poate fi diferit
+                # For refiner, strength has a different meaning (how much to modify the image from base)
+                # Number of steps for refiner can be different
                 refiner_steps = self.refiner_config.get("inference_steps", max(10, effective_num_inference_steps // 3))
                 
                 refiner_args = {
-                    "prompt": prompt, # Refiner-ul poate folosi același prompt
+                    "prompt": prompt, # Refiner can use the same prompt
                     "negative_prompt": effective_negative_prompt,
-                    "image": result_img, # Imaginea generată de pipeline-ul principal
+                    "image": result_img, # Image generated by main pipeline
                     "num_inference_steps": refiner_steps,
-                    "guidance_scale": guidance_scale, # Poate fi ajustat pentru refiner
-                    "strength": effective_refiner_strength, # Controlul efectului refiner-ului
-                    "generator": gen, # Refolosim generatorul pentru consistență
+                    "guidance_scale": guidance_scale, # Can be adjusted for refiner
+                    "strength": effective_refiner_strength, # Control refiner effect
+                    "generator": gen, # Reuse generator for consistency
                 }
 
                 out_refined = self.refiner_pipeline(**refiner_args)
                 result_img = out_refined.images[0]
                 logger.info("Refiner applied successfully.")
 
-            return {"result": result_img, "success": True, "message": "Procesare completă cu succes"}
+            return {"result": result_img, "success": True, "message": "Processing completed successfully"}
         
         except Exception as e:
             logger.error(f"Processing error: {e}", exc_info=True)

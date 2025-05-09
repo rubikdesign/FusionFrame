@@ -2,19 +2,19 @@
 # -*- coding: utf-8 -*-
 
 """
-Configurații pentru modelele AI folosite în FusionFrame 2.0
+Configurations for AI models used in FusionFrame 2.0
 """
 
 class ModelConfig:
-    """Configurare centralizată pentru modelele AI și parametrii lor."""
+    """Centralized configuration for AI models and their parameters."""
 
-    # --- Modele Principale și de Backup ---
+    # --- Main and Backup Models ---
     MAIN_MODEL_NAME = "HiDream-I1-Full"
     BACKUP_MODEL_NAME = "HiDream-I1-Fast"
 
-    # --- Configurări Detaliate pentru Modele Specifice ---
+    # --- Detailed Configurations for Specific Models ---
 
-    # Model Principal (HiDream-I1 Full)
+    # Main Model (HiDream-I1 Full)
     HIDREAM_CONFIG = {
         "pretrained_model_name_or_path": "HiDream-ai/HiDream-I1-Full",
         "vae_name_or_path": "stabilityai/sdxl-vae",
@@ -23,7 +23,7 @@ class ModelConfig:
         "inference_steps": 50
     }
 
-    # Model de Backup (HiDream-I1 Fast)
+    # Backup Model (HiDream-I1 Fast)
     BACKUP_CONFIG = {
         "pretrained_model_name_or_path": "HiDream-ai/HiDream-I1-Fast",
         "vae_name_or_path": "stabilityai/sdxl-vae",
@@ -41,7 +41,7 @@ class ModelConfig:
         "inference_steps": 25
     }
 
-    # --- Modele Auxiliare (Segmentare, Detecție, Analiză) ---
+    # --- Auxiliary Models (Segmentation, Detection, Analysis) ---
 
     # Segment Anything Model (SAM)
     SAM_CONFIG = {
@@ -75,25 +75,25 @@ class ModelConfig:
         "model_id": "Intel/dpt-hybrid-midas"
     }
 
-    # Object Detector (YOLO) - Parametri specifici analizei
+    # Object Detector (YOLO) - Specific analysis parameters
     OBJECT_DETECTOR_CONFIG = {
-        # Presupunem că ModelManager încarcă YOLO sub cheia 'yolo'
-        # Poate fi adăugat 'model_name' aici dacă gestionăm mai multe YOLO.
-        "confidence_threshold": 0.4, # Prag pentru analiza obiectelor
-        "iou_threshold": 0.5          # Prag IoU pentru NMS în YOLO predict
+        # Assuming ModelManager loads YOLO under the key 'yolo'
+        # 'model_name' can be added here if we manage multiple YOLO models.
+        "confidence_threshold": 0.4, # Threshold for object analysis
+        "iou_threshold": 0.5          # IoU threshold for NMS in YOLO predict
     }
 
     # MediaPipe (Selfie Seg & Face Detection)
-    # Șterge/Comentează din AppConfig dacă sunt definite aici
+    # Remove/Comment from AppConfig if defined here
     MEDIAPIPE_SELFIE_MODEL_SELECTION = 1
     MEDIAPIPE_FACE_MODEL_SELECTION = 0
     MEDIAPIPE_FACE_MIN_CONFIDENCE = 0.5
 
     # Rembg
-    # Șterge/Comentează din AppConfig dacă este definit aici
+    # Remove/Comment from AppConfig if defined here
     REMBG_MODEL_NAME = "u2net"
 
-    # --- Alte Configurări Globale ---
+    # --- Other Global Configurations ---
 
     # LoRA
     LORA_CONFIG = {
@@ -101,7 +101,7 @@ class ModelConfig:
         "weight_range": (-1.0, 2.0)
     }
 
-    # Parametri Generali de Generare
+    # General Generation Parameters
     GENERATION_PARAMS = {
         "default_steps": 50,
         "max_steps": 100,

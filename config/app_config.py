@@ -1,30 +1,29 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Configurații generale pentru aplicația FusionFrame 2.0
+General configurations for FusionFrame 2.0 application
 """
 import os
 import torch
-import logging  # Adăugat importul pentru logging
+import logging  # Added logging import
 from pathlib import Path
 
 class AppConfig:
-    """Configurare globală pentru aplicație"""
-    # Informații versiune
+    """Global configuration for the application"""
+    # Version information
     VERSION = "2.0.0"
     APP_NAME = "FusionFrame"
     
-    # Dispozitiv și tipuri de date
+    # Device and data types
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     DTYPE = torch.float16 if torch.cuda.is_available() else torch.float32
 
-
-    MEDIAPIPE_SELFIE_MODEL_SELECTION = 1 # 0 pentru landscape, 1 pentru general
-    MEDIAPIPE_FACE_MODEL_SELECTION = 0 # 0 pentru short-range, 1 pentru full-range
+    MEDIAPIPE_SELFIE_MODEL_SELECTION = 1 # 0 for landscape, 1 for general
+    MEDIAPIPE_FACE_MODEL_SELECTION = 0 # 0 for short-range, 1 for full-range
     MEDIAPIPE_FACE_MIN_CONFIDENCE = 0.5
-    REMBG_MODEL_NAME = "u2net" # Alte opțiuni: "u2net_human_seg", "isnet-general-use", etc.
+    REMBG_MODEL_NAME = "u2net" # Other options: "u2net_human_seg", "isnet-general-use", etc.
     
-    # Verificare CUDA și setare optimizări
+    # CUDA check and optimization settings
     CUDA_AVAILABLE = torch.cuda.is_available()
     if CUDA_AVAILABLE:
         CUDA_VERSION = torch.version.cuda
@@ -33,13 +32,13 @@ class AppConfig:
         else:
             os.environ["DIFFUSERS_DISABLE_XFORMERS"] = "0"
     
-    # Optimizări memorie
+    # Memory optimizations
     MAX_WORKERS = min(4, os.cpu_count() or 2)
     TILE_SIZE = 512
     LOW_VRAM_MODE = torch.cuda.is_available() and \
                     torch.cuda.get_device_properties(0).total_memory < 6e9
     
-    # Directoare aplicație
+    # Application directories
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     MODEL_DIR = os.path.join(BASE_DIR, "models_cache")
     CACHE_DIR = os.path.join(MODEL_DIR, "cache")
@@ -47,31 +46,31 @@ class AppConfig:
     LOGS_DIR = os.path.join(BASE_DIR, "logs")
     OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
     
-    # URL-uri pentru descărcare modele
+    # Model download URLs
     MODEL_URLS = {
         "sam": "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth",
         "modnet": "https://github.com/ZHKKKe/MODNet/releases/download/v1.0/modnet_photographic_portrait_matting.pth",
         "gpen": "https://github.com/yangxy/GPEN/releases/download/v1.0/GPEN-BFR-512.pth",
         "codeformer": "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth",
         "esrgan": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
-        # Adăugăm URL-uri pentru modelele HiDream-I1 dacă sunt necesare
+        # Adding URLs for HiDream-I1 models if needed
         "hidream-i1": "https://huggingface.co/HiDream-ai/HiDream-I1-Full/resolve/main/pytorch_model.safetensors",
     }
     
-    # Parametri pentru calitate și generare
+    # Quality and generation parameters
     QUALITY_THRESHOLD = 0.75
     MAX_REGENERATION_ATTEMPTS = 3
     DEFAULT_GUIDANCE_SCALE = 7.5
     DEFAULT_STEPS = 50
     MAX_STEPS = 80
     
-    # Setări pentru refiner
-    USE_REFINER = True  # Activăm refiner-ul implicit
-    REFINER_STRENGTH = 0.3  # Valoarea implicită pentru intensitatea refiner-ului
+    # Refiner settings
+    USE_REFINER = True  # Enable refiner by default
+    REFINER_STRENGTH = 0.3  # Default value for refiner intensity
     
     @classmethod
     def ensure_dirs(cls):
-        """Asigură că toate directoarele există"""
+        """Ensure all directories exist"""
         Path(cls.MODEL_DIR).mkdir(parents=True, exist_ok=True)
         Path(cls.CACHE_DIR).mkdir(parents=True, exist_ok=True)
         Path(cls.LORA_DIR).mkdir(parents=True, exist_ok=True)
@@ -80,14 +79,14 @@ class AppConfig:
     
     @classmethod
     def setup_logging(cls, level=logging.INFO):
-        """Configurează sistemul de logging"""
-        # Asigură existența directorului pentru log-uri
+        """Configure logging system"""
+        # Ensure log directory exists
         Path(cls.LOGS_DIR).mkdir(parents=True, exist_ok=True)
         
-        # Configurează logging-ul general
+        # Configure general logging
         log_file = os.path.join(cls.LOGS_DIR, "fusionframe.log")
         logging.basicConfig(
-            level=level,  # Folosim parametrul primit
+            level=level,  # Use received parameter
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             handlers=[
                 logging.FileHandler(log_file),

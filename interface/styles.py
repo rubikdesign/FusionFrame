@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Stiluri CSS pentru interfața Gradio în FusionFrame 2.0
+Styles for Gradio in FusionFrame 2.0
 """
 
 CSS_STYLES = """
@@ -14,7 +14,7 @@ CSS_STYLES = """
 .info-panel { background: #e6f7ff; padding: 10px; border-radius: 4px; margin-top: 10px; }
 .example-btn { margin: 5px; }
 
-/* Stilizare modernă */
+
 #generate-btn {
     background: linear-gradient(135deg, #6e8efb, #a777e3);
     border: none;
@@ -41,7 +41,7 @@ CSS_STYLES = """
     transform: scale(1.02);
 }
 
-/* Animație pentru progres */
+
 @keyframes pulse {
     0% { opacity: 0.6; }
     50% { opacity: 1; }

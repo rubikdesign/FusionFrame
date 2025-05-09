@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Implementare pentru modelul FLUX în FusionFrame 2.0
+Implementation for FLUX model in FusionFrame 2.0
 """
 
 import os
@@ -16,27 +16,27 @@ from config.app_config import AppConfig
 from config.model_config import ModelConfig
 from models.base_model import BaseModel
 
-# Setăm logger-ul
+# Set up logger
 logger = logging.getLogger(__name__)
 
 class FluxModel(BaseModel):
     """
-    Implementare pentru modelul FLUX
+    Implementation for FLUX model
     
-    FLUX este un model alternativ pentru editare care
-    poate fi folosit în cazurile în care HiDream nu dă
-    rezultate optime.
+    FLUX is an alternative editing model that
+    can be used when HiDream doesn't produce
+    optimal results.
     """
     
     def __init__(self, 
                 model_id: str = ModelConfig.BACKUP_MODEL, 
                 device: Optional[str] = None):
         """
-        Inițializare pentru modelul FLUX
+        Initialization for FLUX model
         
         Args:
-            model_id: Identificatorul modelului (implicit FLUX.1-dev)
-            device: Dispozitivul pe care va rula modelul (implicit din AppConfig)
+            model_id: Model identifier (default FLUX.1-dev)
+            device: Device where the model will run (default from AppConfig)
         """
         super().__init__(model_id, device)
         
@@ -48,10 +48,10 @@ class FluxModel(BaseModel):
     
     def load(self) -> bool:
         """
-        Încarcă modelul FLUX
+        Load FLUX model
         
         Returns:
-            True dacă încărcarea a reușit, False altfel
+            True if loading succeeded, False otherwise
         """
         logger.info(f"Loading FLUX model '{self.model_id}'")
         
@@ -63,14 +63,14 @@ class FluxModel(BaseModel):
                 ControlNetModel
             )
             
-            # Încarcă VAE
+            # Load VAE
             self.vae = AutoencoderKL.from_pretrained(
                 self.config["vae_name_or_path"],
                 torch_dtype=AppConfig.DTYPE,
                 cache_dir=AppConfig.CACHE_DIR
             ).to(self.device)
             
-            # Încarcă ControlNet dacă există configurație
+            # Load ControlNet if configured
             if ModelConfig.CONTROLNET_CONFIG:
                 try:
                     self.controlnet = ControlNetModel.from_pretrained(
@@ -84,7 +84,7 @@ class FluxModel(BaseModel):
                     logger.error(f"Error loading ControlNet: {e}")
                     logger.info("Continuing without ControlNet")
             
-            # Încarcă pipeline-ul principal
+            # Load main pipeline
             self.pipeline = StableDiffusionXLInpaintPipeline.from_pretrained(
                 self.config["pretrained_model_name_or_path"],
                 vae=self.vae,
@@ -94,22 +94,22 @@ class FluxModel(BaseModel):
                 cache_dir=AppConfig.CACHE_DIR
             )
             
-            # Adaugă controlnet la pipeline dacă este disponibil
+            # Add controlnet to pipeline if available
             if self.controlnet is not None:
                 self.pipeline.controlnet = self.controlnet
             
-            # Optimizări pentru VRAM scăzut
+            # Optimizations for low VRAM
             if AppConfig.LOW_VRAM_MODE:
                 self.pipeline.enable_model_cpu_offload()
             else:
                 self.pipeline.to(self.device)
             
-            # Setează scheduler pentru FLUX
+            # Set scheduler for FLUX
             self.pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
                 self.pipeline.scheduler.config
             )
             
-            # Încarcă LoRA-urile configurate
+            # Load configured LoRAs
             if self.config["lora_weights"]:
                 self._load_loras()
             
@@ -124,10 +124,10 @@ class FluxModel(BaseModel):
             return False
     
     def _load_loras(self) -> None:
-        """Încarcă LoRA-urile configurate"""
+        """Load configured LoRAs"""
         for lora_info in self.config["lora_weights"]:
             try:
-                # Încarcă LoRA
+                # Load LoRA
                 self.pipeline.load_lora_weights(
                     lora_info["path"],
                     adapter_name=lora_info.get("name", os.path.basename(lora_info["path"])),
@@ -140,22 +140,22 @@ class FluxModel(BaseModel):
     
     def unload(self) -> bool:
         """
-        Descarcă modelul din memorie
+        Unload model from memory
         
         Returns:
-            True dacă descărcarea a reușit, False altfel
+            True if unloading succeeded, False otherwise
         """
         if not self.is_loaded:
             return True
             
         try:
-            # Descarcă componentele
+            # Unload components
             self.vae = None
             self.controlnet = None
             self.pipeline = None
             self.model = None
             
-            # Curăță memoria
+            # Clear memory
             torch.cuda.empty_cache()
             
             self.is_loaded = False
@@ -177,21 +177,21 @@ class FluxModel(BaseModel):
                controlnet_conditioning_scale: Optional[float] = None,
                **kwargs) -> Dict[str, Any]:
         """
-        Procesează imaginea folosind modelul FLUX
+        Process image using FLUX model
         
         Args:
-            image: Imaginea de procesat
-            mask_image: Masca pentru procesare
-            prompt: Promptul pentru editare
-            negative_prompt: Promptul negativ (opțional)
-            strength: Intensitatea editării (0.0-1.0)
-            num_inference_steps: Numărul de pași de inferență
-            guidance_scale: Factorul de ghidare
-            controlnet_conditioning_scale: Factorul pentru controlnet
-            **kwargs: Argumentele adiționale pentru pipeline
+            image: Image to process
+            mask_image: Processing mask
+            prompt: Editing prompt
+            negative_prompt: Negative prompt (optional)
+            strength: Editing strength (0.0-1.0)
+            num_inference_steps: Number of inference steps
+            guidance_scale: Guidance scale factor
+            controlnet_conditioning_scale: ControlNet conditioning scale
+            **kwargs: Additional pipeline arguments
             
         Returns:
-            Dicționar cu rezultatele procesării
+            Dictionary with processing results
         """
         if not self.is_loaded:
             if not self.load():
@@ -202,32 +202,32 @@ class FluxModel(BaseModel):
                     'message': f"Model '{self.model_id}' failed to load"
                 }
         
-        # Convertim imaginea la PIL dacă este numpy array
+        # Convert image to PIL if numpy array
         if isinstance(image, np.ndarray):
             image_pil = Image.fromarray(image)
         else:
             image_pil = image
         
-        # Convertim masca la PIL dacă este numpy array
+        # Convert mask to PIL if numpy array
         if isinstance(mask_image, np.ndarray):
             mask_pil = Image.fromarray(mask_image)
         else:
             mask_pil = mask_image
         
-        # Pregătim parametrii
+        # Prepare parameters
         generator = torch.Generator(device=self.device).manual_seed(kwargs.get('seed', 42))
         
-        # Setăm promptul negativ implicit dacă nu este furnizat
+        # Set default negative prompt if not provided
         if negative_prompt is None:
             negative_prompt = ModelConfig.GENERATION_PARAMS["negative_prompt"]
         
-        # Pregătim argumentele pentru controlnet dacă este disponibil
+        # Prepare controlnet arguments if available
         controlnet_args = {}
         if self.controlnet is not None and controlnet_conditioning_scale is not None:
             controlnet_args["controlnet_conditioning_scale"] = controlnet_conditioning_scale
         
         try:
-            # Generăm rezultatul
+            # Generate result
             result = self.pipeline(
                 prompt=prompt,
                 negative_prompt=negative_prompt,
@@ -241,11 +241,11 @@ class FluxModel(BaseModel):
                 **kwargs
             )
             
-            # Returnăm rezultatul
+            # Return result
             return {
                 'result': result.images[0],
                 'success': True,
-                'message': "Procesare completă cu succes"
+                'message': "Processing completed successfully"
             }
             
         except Exception as e:
@@ -258,14 +258,14 @@ class FluxModel(BaseModel):
     
     def get_info(self) -> Dict[str, Any]:
         """
-        Obține informații detaliate despre model
+        Get detailed model information
         
         Returns:
-            Dicționar cu informații detaliate
+            Dictionary with detailed information
         """
         info = super().get_info()
         
-        # Adăugăm informații specifice pentru FLUX
+        # Add FLUX-specific information
         info.update({
             "config": self.config,
             "has_controlnet": self.controlnet is not None,
