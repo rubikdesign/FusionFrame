@@ -11,7 +11,7 @@ import torch
 import logging
 import requests
 import zipfile
-import time  # Adăugat import pentru time
+import time
 from tqdm.auto import tqdm
 from pathlib import Path
 from typing import Optional, Dict, Any, Union, List
@@ -20,7 +20,21 @@ from typing import Optional, Dict, Any, Union, List
 try:
     from models.base_model import BaseModel
 except ImportError:
-    BaseModel = object
+    BaseModel = object #type: ignore
+
+# Importă FluxModel și HiDreamModel (HiDream poate fi păstrat ca backup sau pentru alte scopuri)
+try:
+    from models.flux_model import FluxModel
+except ImportError:
+    FluxModel = None #type: ignore
+    logging.getLogger(__name__).error("FluxModel not found. Ensure flux_model.py exists in the models directory.")
+
+try:
+    from models.hidream_model import HiDreamModel # Păstrează dacă HiDream este folosit ca backup
+except ImportError:
+    HiDreamModel = None #type: ignore
+    logging.getLogger(__name__).warning("HiDreamModel not found.")
+
 
 from config.app_config import AppConfig
 from config.model_config import ModelConfig
@@ -33,7 +47,7 @@ try:
     TRANSFORMERS_AVAILABLE = True
 except ImportError:
     logging.getLogger(__name__).warning("Transformers library not found/outdated.")
-    AutoImageProcessor, AutoModelForImageClassification, AutoModelForDepthEstimation = None, None, None
+    AutoImageProcessor, AutoModelForImageClassification, AutoModelForDepthEstimation = None, None, None #type: ignore
     TRANSFORMERS_AVAILABLE = False
 
 # SAM Predictor Imports (with fallback)
@@ -42,23 +56,24 @@ try:
     SAM_AVAILABLE = True
 except ImportError:
     logging.getLogger(__name__).warning("'segment_anything' library not found. SAM features disabled.")
-    sam_model_registry, SamPredictor = None, None
+    sam_model_registry, SamPredictor = None, None #type: ignore
     SAM_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
 class ModelManager:
-    _instance = None
-    
+    _instance: Optional['ModelManager'] = None
+    _initialized: bool = False
+
     # Lista modelelor care pot fi încărcate pe CPU pentru a economisi VRAM
     CPU_FRIENDLY_MODELS = [
-        'image_classifier', 'depth_estimator', 'yolo', 
+        'image_classifier', 'depth_estimator', 'yolo',
         'mediapipe', 'face_detector', 'rembg'
     ]
-    
+
     # Lista modelelor care sunt esențiale și ar trebui să rămână pe GPU
     ESSENTIAL_GPU_MODELS = ['main', 'sam_predictor', 'clipseg']
-    
+
     def __new__(cls): # Singleton
         if cls._instance is None:
             cls._instance = super(ModelManager, cls).__new__(cls)
@@ -69,18 +84,17 @@ class ModelManager:
         if self._initialized:
             return
         self.models: Dict[str, Any] = {}
-        self.config = AppConfig  # Folosim clasa direct, nu instanțiem
+        self.config = AppConfig
         self.model_config = ModelConfig
-        self.config.ensure_dirs()
+        self.config.ensure_dirs() #type: ignore
         self._initialized = True
-        
-        # Adăugăm configurări pentru gestionarea memoriei
-        self.memory_stats = {
+
+        self.memory_stats: Dict[str, Any] = {
             "last_check": 0,
             "loaded_models": [],
             "memory_usage": {}
         }
-        
+
         logger.info("ModelManager initialized")
 
     # --- Metode pentru gestionarea memoriei ---
@@ -89,35 +103,33 @@ class ModelManager:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
-            
-            # Logarea utilizării memoriei
+
             allocated = torch.cuda.memory_allocated() / (1024**3)
             reserved = torch.cuda.memory_reserved() / (1024**3)
             logger.info(f"GPU memory after cleanup: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
-    
+
     def _log_memory_stats(self):
         """Înregistrează statisticile memoriei."""
         if not torch.cuda.is_available():
             return
-        
+
         current_time = time.time()
-        # Logăm doar o dată la 10 secunde pentru a evita spam-ul
-        if current_time - self.memory_stats["last_check"] < 10:
+        if current_time - self.memory_stats.get("last_check", 0) < 10:
             return
-            
+
         self.memory_stats["last_check"] = current_time
         allocated = torch.cuda.memory_allocated() / (1024**3)
         reserved = torch.cuda.memory_reserved() / (1024**3)
-        
+
         if torch.cuda.is_available():
             try:
                 total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
                 free = total - reserved
                 percent_used = (reserved / total) * 100 if total > 0 else 0
-                
+
                 logger.info(f"Memory Stats: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved, "
-                          f"{free:.2f}GB free ({percent_used:.1f}% used)")
-                
+                              f"{free:.2f}GB free ({percent_used:.1f}% used)")
+
                 self.memory_stats["memory_usage"] = {
                     "allocated_gb": allocated,
                     "reserved_gb": reserved,
@@ -127,59 +139,77 @@ class ModelManager:
                 }
             except Exception as e:
                 logger.error(f"Error getting memory stats: {e}")
-    
+
     def _is_memory_critical(self) -> bool:
         """Verifică dacă memoria GPU este aproape de a fi epuizată."""
         if not torch.cuda.is_available():
             return False
-            
+
         try:
             total = torch.cuda.get_device_properties(0).total_memory
             reserved = torch.cuda.memory_reserved()
+            # Considerăm critică utilizarea peste 90% sau dacă memoria liberă este sub un prag
+            # (de exemplu, MIN_FREE_VRAM_MB din AppConfig)
+            min_free_mb = getattr(self.config, "MIN_FREE_VRAM_MB", 500) # Default 500MB
+            free_mb = (total - reserved) / (1024**2)
+
             percent_used = (reserved / total) * 100 if total > 0 else 0
-            
-            # Considerăm critică utilizarea peste 90%
-            return percent_used > 90
+
+            if percent_used > 90 or free_mb < min_free_mb:
+                logger.warning(f"Memory critical: {percent_used:.1f}% used, {free_mb:.0f}MB free.")
+                return True
+            return False
         except Exception as e:
             logger.error(f"Error checking memory status: {e}")
-            return False
-    
+            return False # Presupunem că nu e critică în caz de eroare
+
     def _should_use_cpu_for_model(self, model_name: str) -> bool:
         """Determină dacă un model ar trebui încărcat pe CPU pentru a economisi VRAM."""
-        # Verifică dacă avem modo LOW_VRAM activat
         low_vram_mode = getattr(self.config, "LOW_VRAM_MODE", False)
-        
-        # Dacă este un model care poate rula pe CPU și suntem în LOW_VRAM_MODE, folosim CPU
+
         if model_name in self.CPU_FRIENDLY_MODELS and low_vram_mode:
+            logger.info(f"LOW_VRAM_MODE: Model '{model_name}' will use CPU.")
             return True
-            
-        # Dacă memoria este critică, forțăm modelele non-esențiale pe CPU
+
+        force_cpu_models_list = getattr(self.config, "FORCE_CPU_MODELS", [])
+        if model_name in force_cpu_models_list:
+            logger.info(f"FORCE_CPU_MODELS: Model '{model_name}' forced to CPU.")
+            return True
+
         if self._is_memory_critical() and model_name not in self.ESSENTIAL_GPU_MODELS:
             logger.warning(f"Memory is critical. Forcing model '{model_name}' to CPU.")
             return True
-            
+
         return False
-    
+
     def _get_device_for_model(self, model_name: str) -> str:
         """Determină dispozitivul potrivit pentru un model."""
         if self._should_use_cpu_for_model(model_name):
             return "cpu"
-        return self.config.DEVICE
+        return str(self.config.DEVICE)
+
 
     # --- Metode Utilitare ---
     def _get_filename_from_url(self, url: str) -> str:
         try:
-            path = requests.utils.urlparse(url).path
+            # Verifică dacă requests.utils este disponibil
+            if hasattr(requests, 'utils') and hasattr(requests.utils, 'urlparse'):
+                path = requests.utils.urlparse(url).path #type: ignore
+            else:
+                # Fallback simplu dacă requests.utils nu e disponibil (puțin probabil)
+                from urllib.parse import urlparse
+                path = urlparse(url).path
             name = os.path.basename(path)
             return name if name else (path.split('/')[-1] if '/' in path else "downloaded_file")
-        except:
-            logger.warning(f"URL parse failed: {url}")
+        except Exception as e: # Prinde excepții mai specifice dacă e posibil
+            logger.warning(f"URL parse failed for {url}: {e}")
             return "downloaded_file"
+
 
     def download_file(self, url: str, dest: str, desc: Optional[str]=None) -> Optional[str]:
         name = desc or os.path.basename(dest)
         logger.info(f"Downloading {name} to {dest}")
-        total_size = 0 # Inițializăm total_size
+        total_size = 0
         try:
             os.makedirs(os.path.dirname(dest), exist_ok=True)
             r = requests.get(url, stream=True, timeout=120)
@@ -191,27 +221,32 @@ class ModelManager:
                     p.update(len(chunk))
             logger.info(f"Download complete: {dest}")
             return dest
+        except requests.exceptions.RequestException as e_req:
+            logger.error(f"Download request error for {name}: {e_req}", exc_info=True)
+        except IOError as e_io:
+            logger.error(f"File I/O error for {name} at {dest}: {e_io}", exc_info=True)
         except Exception as e:
-            logger.error(f"Download error {name}: {e}", exc_info=True)
-            if os.path.exists(dest):
-                try:
-                    # Verificăm mărimea doar dacă descărcarea a început (total_size > 0)
-                    # sau dacă fișierul are mărime 0
-                    if os.path.getsize(dest) == 0 or \
-                       (total_size > 0 and os.path.getsize(dest) != total_size):
-                        logger.warning(f"Removing potentially incomplete/zero-byte file: {dest}")
-                        os.remove(dest)
-                except OSError as e_remove:
-                    logger.warning(f"Could not remove potentially corrupted file: {dest} - {e_remove}")
-            return None
+            logger.error(f"Generic download error for {name}: {e}", exc_info=True)
+
+        if os.path.exists(dest):
+            try:
+                if os.path.getsize(dest) == 0 or \
+                   (total_size > 0 and os.path.getsize(dest) != total_size):
+                    logger.warning(f"Removing potentially incomplete/zero-byte file: {dest}")
+                    os.remove(dest)
+            except OSError as e_remove:
+                logger.warning(f"Could not remove potentially corrupted file: {dest} - {e_remove}")
+        return None
 
     def download_and_extract_zip(self, url: str, dest_dir: str) -> Optional[str]:
         logger.info(f"DL/Extract zip {url} to {dest_dir}")
         os.makedirs(dest_dir, exist_ok=True)
-        os.makedirs(self.config.CACHE_DIR, exist_ok=True)
+        if not os.path.exists(self.config.CACHE_DIR): #type: ignore
+            os.makedirs(self.config.CACHE_DIR, exist_ok=True) #type: ignore
+
         zip_name = self._get_filename_from_url(url)
         zip_name += ".zip" if not zip_name.lower().endswith(".zip") else ""
-        tmp_path = os.path.join(self.config.CACHE_DIR, zip_name)
+        tmp_path = os.path.join(self.config.CACHE_DIR, zip_name) #type: ignore
         tmp_obj = Path(tmp_path)
         try:
             if not (tmp_obj.exists() and tmp_obj.stat().st_size > 0):
@@ -219,7 +254,7 @@ class ModelManager:
                     return None
             else:
                 logger.info(f"Zip {tmp_path} exists.")
-                
+
             logger.info(f"Extracting {tmp_path} to {dest_dir}...")
             with zipfile.ZipFile(tmp_path, 'r') as zf:
                 zf.extractall(dest_dir)
@@ -231,483 +266,732 @@ class ModelManager:
                 try:
                     os.remove(tmp_path)
                     logger.info(f"Removed corrupted zip: {tmp_path}")
-                except OSError as e:
-                    logger.warning(f"Could not remove bad zip: {e}")
+                except OSError as e_rm_zip:
+                    logger.warning(f"Could not remove bad zip: {e_rm_zip}")
         except Exception as e:
             logger.error(f"Zip DL/Extract error: {e}", exc_info=True)
         return None
 
     def ensure_model(self, model_key: str) -> str:
-        assets_dir = os.path.join(self.config.MODEL_DIR, model_key)
+        assets_dir = os.path.join(self.config.MODEL_DIR, model_key) #type: ignore
         os.makedirs(assets_dir, exist_ok=True)
         model_urls = getattr(self.config, 'MODEL_URLS', getattr(self.model_config, 'MODEL_URLS', {}))
         url = model_urls.get(model_key)
         if not url:
-            logger.warning(f"No URL for '{model_key}'.")
+            logger.warning(f"No URL for '{model_key}'. Assets directory: {assets_dir}")
             return assets_dir
-            
+
         if model_key == "sam":
-            chk_name = self.model_config.SAM_CONFIG.get("checkpoint")
+            sam_cfg = getattr(self.model_config, "SAM_CONFIG", {})
+            chk_name = sam_cfg.get("checkpoint", "sam_vit_h_4b8939.pth") # Default checkpoint
             chk_path = os.path.join(assets_dir, chk_name)
             if not (os.path.exists(chk_path) and os.path.getsize(chk_path) > 0):
-                logger.info(f"SAM .pth missing, DL {url}...")
-                if not self.download_file(url, chk_path, description=chk_name):
-                    logger.error("Failed DL SAM .pth.")
+                logger.info(f"SAM .pth missing, DL {url} to {chk_path}...")
+                if not self.download_file(url, chk_path, desc=chk_name): # Folosește desc în loc de description
+                    logger.error(f"Failed DL SAM .pth from {url}.")
             else:
                 logger.debug(f"SAM .pth found: {chk_path}")
+        # Adaugă logica similară pentru alte modele dacă necesită descărcare manuală de fișiere specifice
+        # De exemplu, pentru FLUX dacă safetensors nu e direct in repo-ul pipeline-ului:
+        elif model_key == ModelConfig.MAIN_MODEL and model_key == "FLUX.1-dev": # Verifică dacă modelul principal este FLUX
+            flux_cfg = getattr(self.model_config, "FLUX_CONFIG", {})
+            model_path = flux_cfg.get("pretrained_model_name_or_path")
+            # Dacă model_path este un URL direct către un fișier .safetensors, descarcă-l
+            if url.endswith(".safetensors") and not os.path.exists(os.path.join(assets_dir, os.path.basename(url))):
+                 logger.info(f"FLUX .safetensors missing, DL {url}...")
+                 dest_file = os.path.join(assets_dir, os.path.basename(url))
+                 if not self.download_file(url, dest_file, desc=os.path.basename(url)):
+                     logger.error(f"Failed DL FLUX .safetensors from {url}.")
+                 else: # Actualizează calea în config dacă descărcăm local
+                     flux_cfg["pretrained_model_name_or_path"] = dest_file
+
+
         return assets_dir
 
     # --- Model loading methods ---
     def load_main_model(self) -> None:
-        logger.debug("Request main model load...")
+        logger.debug(f"Request main model load (Model ID from config: {ModelConfig.MAIN_MODEL})")
+
+        # Verifică dacă modelul principal este deja încărcat și este de tipul corect
+        current_main_model_type = None
+        if ModelConfig.MAIN_MODEL == "FLUX.1-dev" and FluxModel is not None:
+            current_main_model_type = FluxModel
+        elif ModelConfig.MAIN_MODEL == "HiDream-I1-Fast" and HiDreamModel is not None: # Sau alt ID pentru HiDream
+            current_main_model_type = HiDreamModel
+        # Adaugă alte modele principale aici dacă e cazul
+
         if 'main' in self.models and isinstance(self.models.get('main'), BaseModel) and self.models['main'].is_loaded:
-            return
-            
-        # Curățăm memoria înainte de a încărca modelul principal
-        self._clear_gpu_memory()
-        
-        try:
-            from models.hidream_model import HiDreamModel
-            logger.info("Instantiating HiDreamModel...")
-            inst = HiDreamModel()
-            if inst.load():
-                self.models['main'] = inst
-                logger.info("Main model loaded.")
-                self._log_memory_stats()  # Logăm utilizarea memoriei după încărcare
+            if current_main_model_type and isinstance(self.models.get('main'), current_main_model_type):
+                logger.info(f"{ModelConfig.MAIN_MODEL} (main) is already loaded.")
+                return
             else:
-                logger.error("HiDream load() failed.")
+                logger.info(f"Current main model is {type(self.models.get('main'))}, "
+                              f"but config expects {ModelConfig.MAIN_MODEL}. Unloading to load correct model.")
+                self.unload_model('main')
+
+        self._clear_gpu_memory()
+
+        ModelClassToLoad = None
+        model_id_to_load = ModelConfig.MAIN_MODEL
+
+        if model_id_to_load == "FLUX.1-dev" and FluxModel is not None:
+            ModelClassToLoad = FluxModel
+            logger.info("Preparing to load FluxModel as main model.")
+        elif model_id_to_load == "HiDream-I1-Fast" and HiDreamModel is not None: # Sau alt ID HiDream
+            ModelClassToLoad = HiDreamModel
+            logger.info("Preparing to load HiDreamModel as main model.")
+        # Adaugă alte modele principale aici
+
+        if ModelClassToLoad is None:
+            logger.error(f"Main model '{model_id_to_load}' is configured, but its class is not available or not imported correctly (FluxModel: {FluxModel is not None}, HiDreamModel: {HiDreamModel is not None}).")
+            return
+
+        try:
+            logger.info(f"Instantiating {ModelClassToLoad.__name__} for main model...")
+            # ModelClassToLoad va prelua model_id din ModelConfig.MAIN_MODEL și configurația specifică
+            # (FLUX_CONFIG, HIDREAM_CONFIG etc.) din interiorul constructorului său.
+            inst = ModelClassToLoad() #type: ignore
+            if inst.load(): #type: ignore
+                self.models['main'] = inst
+                logger.info(f"Main model ({ModelClassToLoad.__name__} for '{model_id_to_load}') loaded.")
+                self._log_memory_stats()
+            else:
+                logger.error(f"{ModelClassToLoad.__name__} load() failed for main model.")
                 if 'main' in self.models:
                     del self.models['main']
-        except ImportError:
-            logger.error("HiDreamModel class not found.", exc_info=True)
+        except ImportError as ie: # Deși importurile sunt sus, o problemă la runtime ar putea apărea
+            logger.error(f"{ModelClassToLoad.__name__} class not found during instantiation. Import error: {ie}", exc_info=True)
         except Exception as e:
-            logger.error(f"Main load error: {e}", exc_info=True)
+            logger.error(f"Main model ({ModelClassToLoad.__name__}) load error: {e}", exc_info=True)
             self.unload_model('main')
+
 
     def load_sam_model(self) -> None:
         logger.debug("Request SAM predictor load...")
         if 'sam_predictor' in self.models:
             return
-        if not SAM_AVAILABLE:
-            logger.error("SAM library unavailable.")
+        if not SAM_AVAILABLE or sam_model_registry is None or SamPredictor is None:
+            logger.error("SAM library or components (sam_model_registry, SamPredictor) unavailable.")
             return
-            
-        # Curățăm memoria înainte de a încărca SAM
+
         self._clear_gpu_memory()
-        
+
         try:
             assets_dir = self.ensure_model("sam")
-            cfg = self.model_config.SAM_CONFIG
-            chk_path = os.path.join(assets_dir, cfg.get("checkpoint"))
-            m_type = cfg.get("model_type")
+            sam_cfg = getattr(self.model_config, "SAM_CONFIG", {})
+            chk_name = sam_cfg.get("checkpoint", "sam_vit_h_4b8939.pth")
+            chk_path = os.path.join(assets_dir, chk_name)
+            m_type = sam_cfg.get("model_type", "vit_h") # Default la "vit_h"
+
             if not (os.path.exists(chk_path) and os.path.getsize(chk_path) > 0):
-                logger.error(f"SAM .pth not found: {chk_path}")
+                logger.error(f"SAM .pth not found or is empty: {chk_path}. Attempt ensure_model again or check URL.")
+                # Opțional, încearcă să descarci din nou dacă ensure_model nu a reușit
+                # self.ensure_model("sam") # Ar putea fi redundant dacă ensure_model e robust
                 return
-                
-            logger.info(f"Loading SAM model ({m_type}) for predictor: {chk_path}")
-            
-            # SAM are nevoie de GPU pentru a fi eficient, deci îl încărcăm pe GPU indiferent de LOW_VRAM_MODE
-            sam_model = sam_model_registry[m_type](checkpoint=chk_path).to(self.config.DEVICE).eval()
-            predictor = SamPredictor(sam_model)
+
+            logger.info(f"Loading SAM model ({m_type}) for predictor from: {chk_path}")
+
+            device_to_use = self._get_device_for_model('sam_predictor') # SAM e pe GPU de obicei
+            logger.info(f"SAM will be loaded on device: {device_to_use}")
+
+            sam_model = sam_model_registry[m_type](checkpoint=chk_path).to(device_to_use).eval() #type: ignore
+            predictor = SamPredictor(sam_model) #type: ignore
             self.models['sam_predictor'] = predictor
-            logger.info(f"SAM model & Predictor loaded.")
+            logger.info(f"SAM model & Predictor loaded on {device_to_use}.")
             self._log_memory_stats()
         except KeyError as e:
-            logger.error(f"SAM Config key error: {e}", exc_info=True)
+            logger.error(f"SAM Config key error or invalid model_type '{m_type}': {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Error loading SAM/predictor: {e}", exc_info=True)
+
 
     def load_clipseg_model(self) -> None:
         logger.debug("Request CLIPSeg...")
         if 'clipseg' in self.models:
             return
         if not TRANSFORMERS_AVAILABLE:
+            logger.error("Transformers library not available for CLIPSeg.")
             return
-            
-        # Curățăm memoria înainte de a încărca CLIPSeg
+
         self._clear_gpu_memory()
-        
+
         try:
-            from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
-            mid = self.model_config.CLIP_CONFIG.get("model_id")
+            from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation # Import local
+            clip_cfg = getattr(self.model_config, "CLIP_CONFIG", {})
+            mid = clip_cfg.get("model_id", "CIDAS/clipseg-rd64-refined") # Default model ID
             logger.info(f"Loading CLIPSeg: {mid}")
+
+            device_to_use = self._get_device_for_model('clipseg') # CLIPSeg e de obicei pe GPU
+
             p = CLIPSegProcessor.from_pretrained(mid, cache_dir=self.config.CACHE_DIR)
-            
-            # CLIPSeg ar trebui să fie pe GPU pentru eficiență
-            device = self.config.DEVICE
             m = CLIPSegForImageSegmentation.from_pretrained(
-                mid, 
-                torch_dtype=self.config.DTYPE,
+                mid,
+                torch_dtype=self.config.DTYPE if device_to_use != "cpu" else torch.float32, #type: ignore
                 cache_dir=self.config.CACHE_DIR
-            ).to(device).eval()
-            
-            self.models['clipseg'] = {'processor': p, 'model': m, 'device': device}
-            logger.info(f"CLIPSeg loaded on {device}.")
+            ).to(device_to_use).eval()
+
+            self.models['clipseg'] = {'processor': p, 'model': m, 'device': device_to_use}
+            logger.info(f"CLIPSeg loaded on {device_to_use}.")
             self._log_memory_stats()
         except Exception as e:
             logger.error(f"CLIPSeg load error: {e}", exc_info=True)
+
 
     def _load_yolo_model(self) -> Optional[Any]:
         logger.debug("Request YOLO...")
         if 'yolo' in self.models:
             return self.models['yolo']
-            
-        # Curățăm memoria și determinăm dispozitivul
-        self._clear_gpu_memory()
+
         device = self._get_device_for_model('yolo')
-        
+        self._clear_gpu_memory() # Curăță înainte de a încărca YOLO
+
         try:
-            from ultralytics import YOLO
-            
-            # Folosim varianta lite pentru a economisi memorie
-            if device == "cpu" or self.config.LOW_VRAM_MODE:
-                name = "yolov8n-seg.pt"  # Varianta nano, economică din punct de vedere al memoriei
-                logger.info("Using YOLOv8-nano for low VRAM mode")
+            from ultralytics import YOLO # Import local
+            yolo_cfg = getattr(self.model_config, "OBJECT_DETECTOR_CONFIG", {})
+
+            if device == "cpu" or getattr(self.config, "LOW_VRAM_MODE", False):
+                name = yolo_cfg.get("lightweight_model_id", "yolov8n-seg.pt")
+                logger.info(f"Using lightweight YOLO ({name}) for low VRAM mode or CPU.")
             else:
-                name = "yolov8x-seg.pt"  # Varianta completă
-            
-            path = Path(self.config.MODEL_DIR) / "YOLO" / name
-            target = str(path) if path.is_file() else name
-            
-            logger.info(f"Loading YOLO: {target} on {device}")
+                name = yolo_cfg.get("model_id", "yolov8x-seg.pt")
+                logger.info(f"Using standard YOLO ({name}).")
+
+            # YOLO descarcă automat modelul dacă nu îl găsește local la 'name'
+            # Nu este necesar să construim calea completă decât dacă vrem să forțăm un fișier local
+            # target = str(Path(self.config.MODEL_DIR) / "YOLO" / name) if Path(self.config.MODEL_DIR / "YOLO" / name).is_file() else name
+            target = name # YOLO se ocupă de descărcare/cale
+
+            logger.info(f"Loading YOLO: {target} (intended device: {device})")
+            # YOLO își gestionează propriul dispozitiv intern, dar putem specifica la inferență
             m = YOLO(target)
-            
-            # YOLO se va încărca automat pe GPU la prima utilizare,
-            # dar putem înregistra dispozitivul dorit
-            self.models['yolo'] = {'model': m, 'device': device}
-            logger.info(f"YOLO loaded (will run on {device}).")
+            # m.to(device) # YOLO face asta automat la prima inferență sau poate fi setat global
+
+            self.models['yolo'] = {'model': m, 'device': device} # Stocăm dispozitivul intenționat
+            logger.info(f"YOLO '{target}' loaded (will attempt to use {device} on inference).")
             self._log_memory_stats()
             return self.models['yolo']
+        except ImportError:
+            logger.error("Ultralytics YOLO library not found.")
+            return None
         except Exception as e:
             logger.error(f"YOLO load error: {e}", exc_info=True)
             return None
 
+
     def _load_mediapipe_model(self) -> Optional[Any]:
-        logger.debug("Request MP Selfie...")
-        if 'mediapipe' in self.models:
+        logger.debug("Request MP Selfie Segmentation...")
+        if 'mediapipe' in self.models: # Nume mai specific, ex: 'mediapipe_selfie_segmentation'
             return self.models['mediapipe']
-            
-        # MediaPipe merge doar pe CPU, nu necesită curățarea memoriei GPU
+
+        # MediaPipe rulează pe CPU, nu necesită curățarea memoriei GPU în mod specific pentru el
         try:
-            import mediapipe as mp
-            sel = getattr(self.model_config, "MEDIAPIPE_SELFIE_MODEL_SELECTION", 1)
-            seg = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=sel)
-            self.models['mediapipe'] = {'model': seg, 'device': 'cpu'}
-            logger.info("MP Selfie loaded (CPU only).")
+            import mediapipe as mp # Import local
+            # Asigură-te că solutions și selfie_segmentation sunt disponibile
+            if not (hasattr(mp, 'solutions') and hasattr(mp.solutions, 'selfie_segmentation')):
+                logger.error("MediaPipe solutions or selfie_segmentation not found.")
+                return None
+
+            sel_cfg_key = "MEDIAPIPE_SELFIE_MODEL_SELECTION"
+            model_selection_val = getattr(self.config, sel_cfg_key, #type: ignore
+                                       getattr(self.model_config, sel_cfg_key, 1)) # Default 1
+
+            seg = mp.solutions.selfie_segmentation.SelfieSegmentation(model_selection=model_selection_val)
+            self.models['mediapipe'] = {'model': seg, 'device': 'cpu'} # MediaPipe rulează pe CPU
+            logger.info(f"MP Selfie Segmentation (selection={model_selection_val}) loaded (CPU only).")
             return self.models['mediapipe']
+        except ImportError:
+            logger.error("MediaPipe library not found.")
+            return None
         except Exception as e:
-            logger.error(f"MP Selfie load error: {e}", exc_info=True)
+            logger.error(f"MP Selfie Segmentation load error: {e}", exc_info=True)
             return None
 
+
     def _load_face_detector(self) -> Optional[Any]:
-        logger.debug("Request MP FaceDet...")
+        logger.debug("Request MP Face Detection...")
         if 'face_detector' in self.models:
             return self.models['face_detector']
-            
-        # MediaPipe merge doar pe CPU, nu necesită curățarea memoriei GPU
+
         try:
-            import mediapipe as mp
-            sel = getattr(self.model_config, "MEDIAPIPE_FACE_MODEL_SELECTION", 0)
-            conf = getattr(self.model_config, "MEDIAPIPE_FACE_MIN_CONFIDENCE", 0.5)
+            import mediapipe as mp # Import local
+            if not (hasattr(mp, 'solutions') and hasattr(mp.solutions, 'face_detection')):
+                logger.error("MediaPipe solutions or face_detection not found.")
+                return None
+
+            sel_cfg_key = "MEDIAPIPE_FACE_MODEL_SELECTION"
+            conf_cfg_key = "MEDIAPIPE_FACE_MIN_CONFIDENCE"
+
+            model_selection_val = getattr(self.config, sel_cfg_key, #type: ignore
+                                       getattr(self.model_config, sel_cfg_key, 0)) # Default 0
+            min_confidence_val = getattr(self.config, conf_cfg_key, #type: ignore
+                                      getattr(self.model_config, conf_cfg_key, 0.5)) # Default 0.5
+
+
             det = mp.solutions.face_detection.FaceDetection(
-                model_selection=sel,
-                min_detection_confidence=conf
+                model_selection=model_selection_val,
+                min_detection_confidence=min_confidence_val
             )
-            self.models['face_detector'] = {'model': det, 'device': 'cpu'}
-            logger.info("MP FaceDet loaded (CPU only).")
+            self.models['face_detector'] = {'model': det, 'device': 'cpu'} # MediaPipe rulează pe CPU
+            logger.info(f"MP Face Detection (selection={model_selection_val}, confidence={min_confidence_val}) loaded (CPU only).")
             return self.models['face_detector']
+        except ImportError:
+            logger.error("MediaPipe library not found.")
+            return None
         except Exception as e:
-            logger.error(f"MP FaceDet load error: {e}", exc_info=True)
+            logger.error(f"MP Face Detection load error: {e}", exc_info=True)
             return None
 
     def _load_rembg_model(self) -> Optional[Any]:
         logger.debug("Request Rembg session...")
         if 'rembg' in self.models:
             return self.models['rembg']
-            
-        device = self._get_device_for_model('rembg')
-        
+
+        device = self._get_device_for_model('rembg') # Rembg poate folosi GPU
+
         try:
-            from rembg import new_session
-            name = getattr(self.model_config, "REMBG_MODEL_NAME", "u2net")
-            
-            # Dacă suntem în LOW_VRAM_MODE, folosim un model mai mic
-            if device == "cpu" or self.config.LOW_VRAM_MODE:
-                name = "u2netp"  # Varianta mai mică a u2net
-                logger.info("Using smaller Rembg model (u2netp) for low VRAM mode")
-                
-            sess = new_session(model_name=name)
-            self.models['rembg'] = {'model': sess, 'device': device}
-            logger.info(f"Rembg session '{name}' created on {device}.")
+            from rembg import new_session # Import local
+
+            rembg_model_name_key = "REMBG_MODEL_NAME"
+            rembg_light_model_name_key = "REMBG_LIGHTWEIGHT_MODEL_NAME" # Din model_config
+
+            name = getattr(self.model_config, rembg_model_name_key, "u2net") # Default
+
+            if device == "cpu" or getattr(self.config, "LOW_VRAM_MODE", False):
+                name = getattr(self.model_config, rembg_light_model_name_key, "u2netp") # Model mai mic
+                logger.info(f"Using smaller Rembg model ({name}) for low VRAM mode or CPU.")
+
+            # new_session poate accepta providers dacă onnxruntime-gpu e instalat
+            providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if device == 'cuda' and torch.cuda.is_available() else ['CPUExecutionProvider']
+            logger.info(f"Loading Rembg session '{name}' with providers: {providers}")
+            sess = new_session(model_name=name, providers=providers)
+
+            self.models['rembg'] = {'model': sess, 'device': device} # Stocăm dispozitivul țintă
+            logger.info(f"Rembg session '{name}' created (intended device: {device}).")
             return self.models['rembg']
+        except ImportError:
+            logger.error("Rembg library not found.")
+            return None
         except Exception as e:
             logger.error(f"Rembg load error: {e}", exc_info=True)
             return None
+
 
     def _load_image_classifier(self) -> Optional[Dict[str, Any]]:
         logger.debug("Request ImgClassifier...")
         if 'image_classifier' in self.models:
             return self.models['image_classifier']
-        if not TRANSFORMERS_AVAILABLE:
+        if not TRANSFORMERS_AVAILABLE or AutoImageProcessor is None or AutoModelForImageClassification is None:
+            logger.error("Transformers library or components not available for Image Classifier.")
             return None
-            
-        # Curățăm memoria și determinăm dispozitivul
-        self._clear_gpu_memory()
+
         device = self._get_device_for_model('image_classifier')
-        
+        self._clear_gpu_memory()
+
         try:
-            cfg = getattr(self.model_config, "IMAGE_CLASSIFIER_CONFIG", {})
-            mid = cfg.get("model_id")
-            
-            # În LOW_VRAM_MODE, folosim un model mai mic
-            if device == "cpu" or self.config.LOW_VRAM_MODE:
-                mid = "google/vit-base-patch16-224-in21k"  # Un model mai mic dar similar
-                
+            img_cls_cfg = getattr(self.model_config, "IMAGE_CLASSIFIER_CONFIG", {})
+            mid = img_cls_cfg.get("model_id", "google/vit-base-patch16-224") # Default
+
+            if device == "cpu" or getattr(self.config, "LOW_VRAM_MODE", False):
+                mid = img_cls_cfg.get("lightweight_model_id", "google/vit-base-patch16-224-in21k")
+                logger.info(f"Using lightweight Image Classifier ({mid}) for low VRAM or CPU.")
+
+
             logger.info(f"Loading ImgClass: {mid} on {device}")
             p = AutoImageProcessor.from_pretrained(mid, cache_dir=self.config.CACHE_DIR)
             m = AutoModelForImageClassification.from_pretrained(
                 mid,
-                torch_dtype=torch.float32 if device == "cpu" else self.config.DTYPE,
+                torch_dtype=self.config.DTYPE if device != "cpu" else torch.float32, #type: ignore
                 cache_dir=self.config.CACHE_DIR
             ).to(device).eval()
-            
+
             bundle = {'processor': p, 'model': m, 'device': device}
             self.models['image_classifier'] = bundle
-            logger.info(f"ImgClass loaded on {device}.")
+            logger.info(f"ImgClass '{mid}' loaded on {device}.")
             self._log_memory_stats()
             return bundle
         except Exception as e:
             logger.error(f"ImgClass load error: {e}", exc_info=True)
             return None
 
+
     def _load_depth_estimator(self) -> Optional[Dict[str, Any]]:
         logger.debug("Request DepthEst...")
         if 'depth_estimator' in self.models:
             return self.models['depth_estimator']
-        if not TRANSFORMERS_AVAILABLE:
+        if not TRANSFORMERS_AVAILABLE or AutoImageProcessor is None or AutoModelForDepthEstimation is None:
+            logger.error("Transformers library or components not available for Depth Estimator.")
             return None
-            
-        # Curățăm memoria și determinăm dispozitivul
-        self._clear_gpu_memory()
+
         device = self._get_device_for_model('depth_estimator')
-        
+        self._clear_gpu_memory()
+
         try:
-            cfg = getattr(self.model_config, "DEPTH_ESTIMATOR_CONFIG", {})
-            mid = cfg.get("model_id")
-            
-            # În LOW_VRAM_MODE, folosim un model mai mic
-            if device == "cpu" or self.config.LOW_VRAM_MODE:
-                mid = "Intel/dpt-large"  # Un model mai mic dar similar
-                
+            depth_cfg = getattr(self.model_config, "DEPTH_ESTIMATOR_CONFIG", {})
+            mid = depth_cfg.get("model_id", "Intel/dpt-hybrid-midas") # Default
+
+            if device == "cpu" or getattr(self.config, "LOW_VRAM_MODE", False) or getattr(self.config, "DISABLE_DEPTH_ESTIMATION", False): #type: ignore
+                if getattr(self.config, "DISABLE_DEPTH_ESTIMATION", False): #type: ignore
+                    logger.info("Depth estimation is disabled in AppConfig. Skipping load.")
+                    return None
+                mid = depth_cfg.get("lightweight_model_id", "Intel/dpt-large") # Model mai mic
+                logger.info(f"Using lightweight Depth Estimator ({mid}) for low VRAM or CPU.")
+
+
             logger.info(f"Loading DepthEst: {mid} on {device}")
             p = AutoImageProcessor.from_pretrained(mid, cache_dir=self.config.CACHE_DIR)
             m = AutoModelForDepthEstimation.from_pretrained(
                 mid,
-                torch_dtype=torch.float32 if device == "cpu" else self.config.DTYPE,
+                torch_dtype=self.config.DTYPE if device != "cpu" else torch.float32, #type: ignore
                 cache_dir=self.config.CACHE_DIR
             ).to(device).eval()
-            
+
             bundle = {'processor': p, 'model': m, 'device': device}
             self.models['depth_estimator'] = bundle
-            logger.info(f"DepthEst loaded on {device}.")
+            logger.info(f"DepthEst '{mid}' loaded on {device}.")
             self._log_memory_stats()
             return bundle
         except Exception as e:
             logger.error(f"DepthEst load error: {e}", exc_info=True)
             return None
 
+
     def load_all_models(self) -> None:
-        logger.info("Loading/Checking essential models (main, sam_predictor, clipseg)...")
-        self.get_model('main')
-        self.get_model('sam_predictor')
-        self.get_model('clipseg')
+        """Încarcă modelele esențiale definite în config."""
+        essential_models_to_load = getattr(self.config, "ESSENTIAL_MODELS", ["main"]) # Default la ['main']
+        logger.info(f"Loading/Checking essential models: {essential_models_to_load}...")
+        for model_name in essential_models_to_load:
+            self.get_model(model_name)
         logger.info("Essential models check/load initiated.")
 
+
     def unload_model(self, model_name: str) -> None:
-        model_obj = self.models.pop(model_name, None)
-        if model_obj:
+        model_entry = self.models.pop(model_name, None)
+        if model_entry:
             logger.info(f"Unloading model: '{model_name}'...")
             try:
-                actual_model = model_obj.get('model') if isinstance(model_obj, dict) else model_obj
-                if model_name == 'main' and hasattr(actual_model, 'unload'):
-                    actual_model.unload()
-                elif model_name in ('mediapipe', 'face_detector') and hasattr(actual_model, 'close'):
-                    actual_model.close()
-                elif model_name == 'sam_predictor':
-                    logger.debug("Unload SAM predictor.")
-                    
-                del actual_model
-                del model_obj
+                # Cazul pentru modelele principale care moștenesc BaseModel (FluxModel, HiDreamModel)
+                if isinstance(model_entry, BaseModel) and hasattr(model_entry, 'unload'):
+                    model_entry.unload() #type: ignore
+                # Cazul pentru modelele stocate ca dicționare (CLIPSeg, ImgClassifier, etc.)
+                elif isinstance(model_entry, dict) and 'model' in model_entry:
+                    actual_model_component = model_entry['model']
+                    if hasattr(actual_model_component, 'to'): # Mută pe CPU înainte de del
+                        try:
+                            actual_model_component.to('cpu')
+                        except Exception as e_to_cpu:
+                            logger.warning(f"Could not move model component of '{model_name}' to CPU before unload: {e_to_cpu}")
+                    del actual_model_component
+                    if 'processor' in model_entry: # Pentru modelele cu procesor
+                        del model_entry['processor']
+                # Cazul pentru SAM (care e direct predictorul) sau MediaPipe (care are .close())
+                elif model_name == 'sam_predictor' and hasattr(model_entry, 'reset_image'): # SamPredictor
+                     # SamPredictor nu are o metodă 'unload' evidentă, modelul e în spate
+                     # Încercăm să ștergem modelul SAM din GPU dacă e posibil (mai complex)
+                     # Pentru simplitate, doar ștergem referința.
+                    logger.debug("Unloading SAM predictor (reference only).")
+                elif model_name in ('mediapipe', 'face_detector') and hasattr(model_entry.get('model') if isinstance(model_entry, dict) else model_entry, 'close'):
+                    if isinstance(model_entry, dict):
+                        model_entry.get('model').close()
+                    else:
+                        model_entry.close() #type: ignore
+                else: # Cazul general pentru alte tipuri de obiecte model
+                    logger.debug(f"No specific unload for {model_name}, deleting reference.")
+
+                del model_entry # Șterge intrarea din self.models
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
                 logger.info(f"Model '{model_name}' unloaded.")
                 self._log_memory_stats()
             except Exception as e:
-                logger.error(f"Unload {model_name} error: {e}")
+                logger.error(f"Error during unload of '{model_name}': {e}", exc_info=True)
+                # Chiar dacă e eroare, modelul a fost scos din self.models, deci e "unloaded" din perspectiva managerului
         else:
-            logger.debug(f"Unload: Model '{model_name}' not found.")
+            logger.debug(f"Unload: Model '{model_name}' not found or already unloaded.")
+
 
     def get_model(self, model_name: str) -> Any:
         """Obține un model, încărcându-l leneș."""
         if model_name in self.models and self.models[model_name] is not None:
-            # Verificare main model
+            # Verificare specială pentru modelul principal (care moștenește BaseModel)
             if model_name == 'main':
-                main_model = self.models['main']
-                if isinstance(main_model, BaseModel) and not main_model.is_loaded:
-                    logger.warning("Main cached but not loaded. Reloading.")
-                    self.load_main_model()
-                elif not isinstance(main_model, BaseModel):
-                    logger.error(f"Invalid cache for 'main': {type(main_model)}. Reloading.")
+                main_model_instance = self.models['main']
+                if isinstance(main_model_instance, BaseModel):
+                    if not main_model_instance.is_loaded: #type: ignore
+                        logger.warning(f"Main model '{main_model_instance.model_id}' cached but not loaded. Reloading.") #type: ignore
+                        self.load_main_model() # Va reîncărca modelul principal corect
+                    # Verifică dacă tipul modelului principal încărcat corespunde cu ModelConfig.MAIN_MODEL
+                    expected_model_class = None
+                    if ModelConfig.MAIN_MODEL == "FLUX.1-dev": expected_model_class = FluxModel
+                    elif ModelConfig.MAIN_MODEL == "HiDream-I1-Fast": expected_model_class = HiDreamModel #type: ignore
+
+                    if expected_model_class and not isinstance(main_model_instance, expected_model_class):
+                        logger.warning(f"Main model is type {type(main_model_instance)} but config expects {ModelConfig.MAIN_MODEL} ({expected_model_class}). Reloading.")
+                        self.unload_model('main')
+                        self.load_main_model()
+
+                elif not isinstance(main_model_instance, BaseModel): # Ceva e greșit
+                    logger.error(f"Invalid cache for 'main': type is {type(main_model_instance)}, expected BaseModel. Reloading.")
                     self.unload_model('main')
                     self.load_main_model()
-                return self.models.get(model_name)
-                
-            # Pentru modele multi-componente (dicționare)
-            if isinstance(self.models[model_name], dict) and "model" in self.models[model_name]:
-                return self.models[model_name]
-                
+                return self.models.get(model_name) # Returnează modelul (re)încărcat
+
+            # Pentru alte modele (majoritatea stocate ca dicționare sau obiecte directe)
             return self.models[model_name]
 
+
         logger.info(f"Model '{model_name}' not loaded. Lazy loading...")
-        
-        # Verificăm spațiul disponibil înainte de a încărca un model nou
-        if self._is_memory_critical() and model_name in self.CPU_FRIENDLY_MODELS:
-            logger.warning(f"Memory is critical! Loading '{model_name}' on CPU.")
-        
-        # Mapare actualizată pentru modele
+
+        # Verifică politica de încărcare/descărcare înainte de a încărca un model nou
+        self._apply_model_loading_policy(model_name_to_load=model_name)
+
+
         loader_map = {
             'main': self.load_main_model,
             'sam_predictor': self.load_sam_model,
             'clipseg': self.load_clipseg_model,
             'yolo': self._load_yolo_model,
-            'mediapipe': self._load_mediapipe_model,
+            'mediapipe': self._load_mediapipe_model, # Specific pt selfie segmentation
             'face_detector': self._load_face_detector,
             'rembg': self._load_rembg_model,
             'image_classifier': self._load_image_classifier,
             'depth_estimator': self._load_depth_estimator
+            # Adaugă alte mapări aici dacă e necesar
         }
-        
-        # Curățăm memoria înainte de a încărca un model nou
-        self._clear_gpu_memory()
-        
+
+        # self._clear_gpu_memory() # Mutat în interiorul funcțiilor de încărcare unde e relevant (GPU-heavy models)
+
         loader_func = loader_map.get(model_name)
         if loader_func:
-            loader_func()
+            loader_func() # Apelăm funcția de încărcare specifică
         else:
-            logger.warning(f"No loader for key: '{model_name}'.")
+            logger.warning(f"No specific loader function defined for model key: '{model_name}'. Cannot load.")
             return None
 
         final_model = self.models.get(model_name)
         if final_model is None:
-            logger.error(f"Failed to load model '{model_name}'.")
+            logger.error(f"Failed to load model '{model_name}' using its loader function.")
         return final_model
-    
-    def get_memory_status(self) -> Dict[str, Any]:
 
-        memory_info = {
+
+    def get_memory_status(self) -> Dict[str, Any]:
+        memory_info: Dict[str, Any] = {
             "cuda_available": torch.cuda.is_available(),
-            "loaded_models": list(self.models.keys()),
+            "loaded_models_count": len(self.models),
+            "loaded_models_list": list(self.models.keys()),
             "system_ram_available_gb": 0,
+            "system_ram_percent": 0,
             "cuda_info": {}
         }
-    
-        # System RAM info
+
         try:
-            import psutil
-            memory_info["system_ram_available_gb"] = psutil.virtual_memory().available / (1024**3)
-            memory_info["system_ram_percent"] = psutil.virtual_memory().percent
+            import psutil # Import local
+            mem = psutil.virtual_memory()
+            memory_info["system_ram_available_gb"] = round(mem.available / (1024**3), 2)
+            memory_info["system_ram_total_gb"] = round(mem.total / (1024**3), 2)
+            memory_info["system_ram_percent"] = mem.percent
         except ImportError:
-            pass
-        
-        # CUDA memory info
+            logger.warning("psutil not installed, cannot get system RAM info.")
+        except Exception as e:
+            logger.warning(f"Could not get system RAM info: {e}")
+
+
         if torch.cuda.is_available():
             try:
-                current_device = torch.cuda.current_device()
-                device_name = torch.cuda.get_device_name(current_device)
-                total_memory = torch.cuda.get_device_properties(current_device).total_memory
-                allocated_memory = torch.cuda.memory_allocated(current_device)
-                reserved_memory = torch.cuda.memory_reserved(current_device)
-                free_memory = total_memory - allocated_memory
-                
-                memory_info["cuda_info"] = {
-                    "device_name": device_name,
-                    "current_device": current_device,
-                    "total_memory_gb": total_memory / (1024**3),
-                    "allocated_memory_gb": allocated_memory / (1024**3),
-                    "reserved_memory_gb": reserved_memory / (1024**3),
-                    "free_memory_gb": free_memory / (1024**3),
-                    "percent_used": (allocated_memory / total_memory) * 100,
-                    "is_memory_critical": (free_memory / total_memory) < 0.1  # Less than 10% free
-                }
+                # Asigură-te că ID-ul dispozitivului este valid
+                device_id = torch.cuda.current_device() if torch.cuda.device_count() > 0 else 0
+                if device_id < torch.cuda.device_count():
+                    device_name = torch.cuda.get_device_name(device_id)
+                    total_memory = torch.cuda.get_device_properties(device_id).total_memory
+                    allocated_memory = torch.cuda.memory_allocated(device_id)
+                    reserved_memory = torch.cuda.memory_reserved(device_id) # Cât a rezervat PyTorch
+                    # Memoria liberă pe GPU din perspectiva PyTorch este total - rezervat
+                    free_pytorch_reserved = total_memory - reserved_memory
+
+
+                    memory_info["cuda_info"] = {
+                        "device_name": device_name,
+                        "current_device_id": device_id,
+                        "total_memory_gb": round(total_memory / (1024**3), 2),
+                        "allocated_memory_gb": round(allocated_memory / (1024**3), 2), # Alocat efectiv de tensori
+                        "reserved_memory_gb": round(reserved_memory / (1024**3), 2), # Total rezervat de PyTorch
+                        "free_within_reserved_gb": round((reserved_memory - allocated_memory) / (1024**3), 2), # Liber în cache-ul PyTorch
+                        "free_total_pytorch_perspective_gb": round(free_pytorch_reserved / (1024**3), 2), # Total - Rezervat
+                        "percent_allocated_of_total": round((allocated_memory / total_memory) * 100 if total_memory > 0 else 0, 1),
+                        "percent_reserved_of_total": round((reserved_memory / total_memory) * 100 if total_memory > 0 else 0, 1),
+                        "is_memory_critical": self._is_memory_critical() # Reutilizează logica existentă
+                    }
+                else:
+                    logger.warning(f"CUDA device ID {device_id} is out of range. Device count: {torch.cuda.device_count()}")
+                    memory_info["cuda_info"]["error"] = "Invalid CUDA device ID"
+
             except Exception as e:
-                logger.error(f"Error getting CUDA memory status: {e}")
-        
+                logger.error(f"Error getting CUDA memory status: {e}", exc_info=True)
+                memory_info["cuda_info"]["error"] = str(e)
+
         return memory_info
+
 
     def emergency_memory_recovery(self) -> bool:
         """
         Perform emergency memory recovery when CUDA out-of-memory occurs.
-        
-        Returns:
-            True if recovery actions were taken, False otherwise
+        Returns: True if recovery actions were taken, False otherwise
         """
         if not torch.cuda.is_available():
             return False
-        
-        logger.warning("Performing emergency memory recovery")
-        
-        # 1. Move non-essential models to CPU
-        for model_name in list(self.models.keys()):
-            if model_name in self.CPU_FRIENDLY_MODELS and model_name not in self.ESSENTIAL_GPU_MODELS:
-                self._move_model_to_cpu(model_name)
-        
-        # 2. Unload all non-essential models
-        essential_models = getattr(self.config, "ESSENTIAL_MODELS", ["main"])
-        for model_name in list(self.models.keys()):
-            if model_name not in essential_models:
-                logger.info(f"Emergency unloading model: {model_name}")
+
+        logger.warning("EMERGENCY MEMORY RECOVERY triggered!")
+        recovery_actions_taken = False
+
+        # 1. Încearcă să muți modelele non-esențiale, prietenoase cu CPU, pe CPU
+        models_to_move_or_unload = [
+            m for m in self.CPU_FRIENDLY_MODELS if m in self.models and m not in self.ESSENTIAL_GPU_MODELS
+        ]
+        logger.info(f"Attempting to move to CPU: {models_to_move_or_unload}")
+        for model_name in models_to_move_or_unload:
+            if self._move_model_to_cpu(model_name):
+                recovery_actions_taken = True
+
+        self._clear_gpu_memory() # Curăță cache după mutări
+
+        # 2. Dacă memoria e încă critică, descarcă modelele non-esențiale
+        # Lista modelelor esențiale de păstrat, citită din config
+        essential_to_keep = getattr(self.config, "ESSENTIAL_MODELS", ["main"])
+        models_currently_loaded = list(self.models.keys()) # Copie pentru a itera în siguranță
+
+        # Definește o prioritate de descărcare (cele mai puțin importante primele)
+        unload_priority = [
+            'depth_estimator', 'image_classifier', 'yolo', 'rembg',
+            'face_detector', 'mediapipe', 'clipseg', 'sam_predictor',
+            # Adaugă alte modele aici în ordinea inversă a importanței
+        ]
+        # Filtrează pentru a păstra doar modelele încărcate și non-esențiale
+        models_to_consider_unloading = [
+            m for m in unload_priority if m in models_currently_loaded and m not in essential_to_keep
+        ]
+
+        logger.info(f"Models to consider for unloading (if memory still critical): {models_to_consider_unloading}")
+
+        for model_name in models_to_consider_unloading:
+            if self._is_memory_critical() or getattr(self.config, "MODEL_LOADING_POLICY", "KEEP_LOADED") == "AGGRESSIVE_UNLOAD": #type: ignore
+                logger.warning(f"Emergency unloading model: {model_name} due to critical memory or aggressive policy.")
                 self.unload_model(model_name)
-        
-        # 3. Force garbage collection and cache clearing
+                recovery_actions_taken = True
+                self._clear_gpu_memory() # Curăță după fiecare descărcare majoră
+            else: # Dacă memoria nu mai e critică, oprește descărcările de urgență
+                break
+
+
+        # 3. Dacă modelul principal este încărcat și are o metodă de curățare de urgență, apeleaz-o
+        if 'main' in self.models and isinstance(self.models['main'], BaseModel) and hasattr(self.models['main'], 'emergency_cleanup'):
+            logger.warning("Performing emergency cleanup on main model.")
+            try:
+                self.models['main'].emergency_cleanup() #type: ignore
+                recovery_actions_taken = True
+            except Exception as e_main_cleanup:
+                logger.error(f"Error during main model emergency_cleanup: {e_main_cleanup}")
+
+        # 4. Forțează colectarea gunoiului și golirea cache-ului din nou
         self._clear_gpu_memory()
-        
-        # 4. Return success
-        return True
+
+        if recovery_actions_taken:
+            logger.info("Emergency memory recovery actions performed.")
+        else:
+            logger.info("No specific emergency recovery actions were performed (or needed beyond standard cleanup).")
+
+        return recovery_actions_taken
+
 
     def _move_model_to_cpu(self, model_name: str) -> bool:
         """
         Move a model from GPU to CPU to free VRAM.
-        
-        Args:
-            model_name: Name of the model to move
-            
-        Returns:
-            True if successful, False otherwise
+        Returns: True if successful, False otherwise
         """
-        if model_name not in self.models:
+        if model_name not in self.models or self.models[model_name] is None:
+            logger.debug(f"Cannot move '{model_name}' to CPU: not loaded.")
             return False
-        
-        model_obj = self.models[model_name]
-        
+
+        model_entry = self.models[model_name]
+        current_device_of_model = "unknown"
+
         try:
-            # Handle dictionary case (processor + model)
-            if isinstance(model_obj, dict) and "model" in model_obj:
-                model = model_obj["model"]
-                if hasattr(model, "to") and callable(model.to):
-                    logger.info(f"Moving {model_name} to CPU")
-                    model.to("cpu")
-                    model_obj["device"] = "cpu"
+            # Caz pentru modelele care moștenesc BaseModel (ex: FluxModel, HiDreamModel)
+            if isinstance(model_entry, BaseModel):
+                # Verifică dacă modelul principal are componente pe GPU
+                if hasattr(model_entry, 'pipeline') and model_entry.pipeline is not None: #type: ignore
+                    # Încearcă să muți componentele principale ale pipeline-ului (unet, text_encoders dacă nu sunt deja pe CPU)
+                    # Aceasta este o logică mai complexă și depinde de structura modelului.
+                    # FluxModel/HiDreamModel ar trebui să aibă propria logică de CPU offload parțial.
+                    # Aici doar semnalăm că modelul 'main' e considerat mutat dacă e configurat pt CPU în LOW_VRAM.
+                    if hasattr(model_entry, 'device') and model_entry.device == 'cpu': #type: ignore
+                        logger.info(f"Main model '{model_name}' already configured for CPU or components are offloaded.")
+                        return True # Considerat mutat dacă device-ul său e CPU
+                    # Dacă nu, o mutare completă a unui pipeline mare e riscantă și grea.
+                    # Mai bine se bazează pe logica internă de offload a modelului.
+                    logger.warning(f"Moving full pipeline of main model '{model_name}' to CPU is not directly supported here. Relies on model's internal offload.")
+                    # Forțăm o curățare de urgență dacă există, poate ajută
+                    if hasattr(model_entry, 'emergency_cleanup'):
+                        model_entry.emergency_cleanup() #type: ignore
+                    return False # Nu confirmăm mutarea completă aici
+
+            # Caz pentru modelele stocate ca dicționare (CLIPSeg, ImgClassifier, DepthEstimator etc.)
+            elif isinstance(model_entry, dict) and "model" in model_entry and "device" in model_entry:
+                actual_model_component = model_entry["model"]
+                current_device_of_model = model_entry["device"]
+                if current_device_of_model == "cpu":
+                    logger.info(f"Model '{model_name}' component already on CPU.")
+                    return True # Deja pe CPU
+
+                if hasattr(actual_model_component, "to") and callable(actual_model_component.to):
+                    logger.info(f"Moving model component of '{model_name}' from {current_device_of_model} to CPU...")
+                    actual_model_component.to("cpu")
+                    model_entry["device"] = "cpu" # Actualizează starea dispozitivului
+                    # Dacă există și procesor, și el ar trebui mutat dacă e un model nn.Module
+                    if "processor" in model_entry and hasattr(model_entry["processor"], "to") and callable(model_entry["processor"].to) \
+                       and not isinstance(model_entry["processor"], (str, int, float)): # Verifică să nu fie un simplu tip de date
+                        try:
+                            model_entry["processor"].to("cpu")
+                            logger.info(f"Moved processor of '{model_name}' to CPU.")
+                        except Exception as e_proc_cpu:
+                             logger.warning(f"Could not move processor of '{model_name}' to CPU: {e_proc_cpu}")
+                    logger.info(f"Model '{model_name}' component moved to CPU.")
                     return True
-            # Handle direct model case
-            elif hasattr(model_obj, "to") and callable(model_obj.to):
-                logger.info(f"Moving {model_name} to CPU")
-                model_obj.to("cpu")
-                return True
-            return False
+                else:
+                    logger.warning(f"Model component of '{model_name}' does not have a 'to' method. Cannot move.")
+                    return False
+            # Caz pentru YOLO (modelul e în model_entry['model'], device-ul e stocat separat)
+            elif model_name == 'yolo' and isinstance(model_entry, dict) and 'model' in model_entry and 'device' in model_entry:
+                if model_entry['device'] == 'cpu':
+                    logger.info(f"YOLO model '{model_name}' already intended for CPU.")
+                    return True
+                # YOLO își gestionează dispozitivul la inferență. Doar actualizăm starea.
+                logger.info(f"Setting intended device for YOLO model '{model_name}' to CPU.")
+                model_entry['device'] = 'cpu'
+                # Nu există o comandă YOLO().to('cpu') directă care să descarce de pe GPU în mod explicit aici.
+                # Mutarea se face prin a nu specifica GPU la următoarea inferență.
+                return True # Considerăm că am setat intenția
+            # Alte modele (ex: Rembg, care își setează providers la creare)
+            elif model_name == 'rembg' and isinstance(model_entry, dict) and 'device' in model_entry:
+                 if model_entry['device'] == 'cpu':
+                    logger.info(f"Rembg model '{model_name}' already intended for CPU.")
+                    return True
+                 logger.info(f"Setting intended device for Rembg model '{model_name}' to CPU. Will require reload with CPU providers.")
+                 # Pentru Rembg, o schimbare reală de dispozitiv necesită re-crearea sesiunii.
+                 # Aici doar marcăm și la următoarea încărcare se va folosi CPU.
+                 self.unload_model(model_name) # Forțează reîncărcarea la următoarea cerere
+                 logger.info(f"Unloaded Rembg model '{model_name}' to allow reloading on CPU.")
+                 return True
+
+
+            else:
+                logger.warning(f"Model '{model_name}' (type: {type(model_entry)}) does not have a standard structure for CPU moving. Cannot move automatically.")
+                return False
+
         except Exception as e:
-            logger.error(f"Error moving {model_name} to CPU: {e}")
+            logger.error(f"Error moving model '{model_name}' to CPU: {e}", exc_info=True)
             return False
+        return False
+
 
     def monitor_memory_and_recover(self) -> None:
         """
@@ -716,246 +1000,169 @@ class ModelManager:
         """
         if not torch.cuda.is_available():
             return
-        
+
         try:
-            mem_status = self.get_memory_status()
-            cuda_info = mem_status.get("cuda_info", {})
-            
-            # Check if memory is critical
-            if cuda_info.get("is_memory_critical", False):
-                logger.warning(f"CRITICAL MEMORY STATE: {cuda_info.get('free_memory_gb', 0):.2f}GB free, "
-                            f"{cuda_info.get('percent_used', 0):.1f}% used")
-                
-                # Identify models that can be moved to CPU or unloaded
+            if self._is_memory_critical(): # Folosește metoda actualizată _is_memory_critical
+                logger.warning(f"CRITICAL MEMORY STATE DETECTED. Initiating proactive freeing.")
                 self._free_memory_proactively()
+            else:
+                # Verifică politica de descărcare dacă nu e memorie critică
+                policy = getattr(self.config, "MODEL_LOADING_POLICY", "KEEP_LOADED") #type: ignore
+                if policy == "UNLOAD_UNUSED" or policy == "AGGRESSIVE_UNLOAD":
+                    self._apply_model_loading_policy()
+
+
         except Exception as e:
-            logger.error(f"Error in memory monitoring: {e}")
+            logger.error(f"Error in memory monitoring/recovery: {e}", exc_info=True)
+
+
+    def _apply_model_loading_policy(self, model_name_to_load: Optional[str] = None) -> None:
+        """Aplică politica de încărcare/descărcare a modelelor."""
+        policy = getattr(self.config, "MODEL_LOADING_POLICY", "KEEP_LOADED") #type: ignore
+        essential_models = getattr(self.config, "ESSENTIAL_MODELS", ["main"]) #type: ignore
+        model_unload_timeout = getattr(self.config, "MODEL_UNLOAD_TIMEOUT", 300) #type: ignore # 5 minute default
+
+        if policy == "KEEP_LOADED":
+            return # Nu face nimic
+
+        models_currently_loaded = list(self.models.keys())
+        for model_name in models_currently_loaded:
+            if model_name in essential_models:
+                continue # Nu descărca modelele esențiale
+
+            # Logica pentru UNLOAD_UNUSED / AGGRESSIVE_UNLOAD
+            # AGGRESSIVE_UNLOAD: descarcă tot ce nu e esențial și nu e modelul curent cerut
+            if policy == "AGGRESSIVE_UNLOAD":
+                if model_name_to_load is None or model_name != model_name_to_load:
+                    logger.info(f"Aggressive policy: Unloading '{model_name}'.")
+                    self.unload_model(model_name)
+
+            # UNLOAD_UNUSED: necesită urmărirea timpului de neutilizare (mai complex, nu implementat complet aici)
+            # Pentru simplitate, dacă e UNLOAD_UNUSED și nu e modelul curent, descarcă-l
+            # O implementare corectă ar avea un timestamp last_used pentru fiecare model.
+            elif policy == "UNLOAD_UNUSED":
+                 if model_name_to_load is None or model_name != model_name_to_load:
+                    logger.info(f"Unload unused policy (simplified): Unloading '{model_name}'.")
+                    self.unload_model(model_name)
+        if policy != "KEEP_LOADED":
+            self._clear_gpu_memory()
+
 
     def _free_memory_proactively(self) -> None:
-        """
-        Proactively free memory when approaching critical levels.
-        """
-        # Get minimum free VRAM threshold from config
-        min_free_vram_mb = getattr(self.config, "MIN_FREE_VRAM_MB", 1000)
-        
-        # Check current free VRAM
-        free_vram_mb = 0
-        if torch.cuda.is_available():
-            free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
-            free_vram_mb = free_memory / (1024 * 1024)
-        
-        # If we have enough free VRAM, nothing to do
-        if free_vram_mb >= min_free_vram_mb:
+        """Proactively free memory when approaching critical levels."""
+        if not torch.cuda.is_available(): return
+
+        min_free_vram_mb = getattr(self.config, "MIN_FREE_VRAM_MB", 500) #type: ignore
+        current_cuda_info = self.get_memory_status().get("cuda_info", {})
+        # Folosim free_total_pytorch_perspective_gb care e total_gpu - reserved_by_pytorch
+        free_vram_mb_pytorch = current_cuda_info.get("free_total_pytorch_perspective_gb", float('inf')) * 1024
+
+        if free_vram_mb_pytorch >= min_free_vram_mb:
+            logger.debug(f"Proactive free: Sufficient VRAM ({free_vram_mb_pytorch:.0f}MB free vs {min_free_vram_mb}MB threshold). No action.")
             return
-        
-        logger.warning(f"Low VRAM: {free_vram_mb:.0f}MB free (below {min_free_vram_mb}MB threshold)")
-        
-        # Define unload priority (least important first)
+
+        logger.warning(f"Low VRAM: {free_vram_mb_pytorch:.0f}MB free (below {min_free_vram_mb}MB threshold). Proactively freeing memory.")
+
+        # Definește prioritatea de descărcare (cele mai puțin importante/mai mari primele)
         unload_priority = [
-            'depth_estimator',  # Heavy but not critical
-            'image_classifier', # Useful but not critical
-            'yolo',             # Object detector - heavy
-            'clipseg',          # Used only for mask generation
-            'sam_predictor',    # Very heavy, used for segmentation
-            'gpen',             # Used only for face enhancement
-            'esrgan',           # Used only for detail enhancement
-            'codeformer',       # Used only for face enhancement
-            'rembg',            # Used for background removal
-            'mediapipe',        # Lightweight media processor
-            'face_detector',    # Lightweight detector
+            'depth_estimator', 'image_classifier', 'yolo', 'clipseg', 'sam_predictor',
+            'rembg', 'face_detector', 'mediapipe',
+            # Adaugă aici alte modele în ordinea descrescătoare a importanței sau crescătoare a mărimii
         ]
-        
-        # Remove essential models from unload priority
-        essential_models = getattr(self.config, "ESSENTIAL_MODELS", ["main"])
-        unload_priority = [m for m in unload_priority if m not in essential_models]
-        
-        # First try to move models to CPU
-        for model_name in unload_priority:
-            if model_name in self.models:
-                # Skip if it's already at an equivalent memory state
-                if isinstance(self.models[model_name], dict) and self.models[model_name].get("device") == "cpu":
-                    continue
-                    
-                # Try to move the model to CPU
+        essential_models = getattr(self.config, "ESSENTIAL_MODELS", ["main"]) #type: ignore
+        unload_priority = [m for m in unload_priority if m not in essential_models and m in self.models]
+
+        # 1. Încearcă să muți pe CPU modelele compatibile
+        logger.info(f"Proactive: Attempting to move models to CPU from: {unload_priority}")
+        for model_name in list(unload_priority): # Copie pentru a modifica în timpul iterării
+            if model_name in self.CPU_FRIENDLY_MODELS: # Verifică dacă e eligibil pentru CPU
                 if self._move_model_to_cpu(model_name):
-                    logger.info(f"Moved {model_name} to CPU to reduce VRAM usage")
-                    
-                    # Check if we've freed enough memory
-                    if torch.cuda.is_available():
-                        free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
-                        free_vram_mb = free_memory / (1024 * 1024)
-                        if free_vram_mb >= min_free_vram_mb:
-                            logger.info(f"Successfully freed memory by moving models to CPU: {free_vram_mb:.0f}MB free")
-                            return
-        
-        # If moving to CPU wasn't enough, unload models
-        for model_name in unload_priority:
-            if model_name in self.models:
-                logger.info(f"Unloading {model_name} to free memory")
-                self.unload_model(model_name)
-                
-                # Check if we've freed enough memory
-                if torch.cuda.is_available():
-                    free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
-                    free_vram_mb = free_memory / (1024 * 1024)
-                    if free_vram_mb >= min_free_vram_mb:
-                        logger.info(f"Successfully freed memory by unloading models: {free_vram_mb:.0f}MB free")
+                    logger.info(f"Proactively moved '{model_name}' to CPU.")
+                    current_cuda_info = self.get_memory_status().get("cuda_info", {})
+                    free_vram_mb_pytorch = current_cuda_info.get("free_total_pytorch_perspective_gb", float('inf')) * 1024
+                    if free_vram_mb_pytorch >= min_free_vram_mb:
+                        logger.info(f"Sufficient VRAM freed by moving models to CPU: {free_vram_mb_pytorch:.0f}MB free.")
+                        self._clear_gpu_memory()
                         return
+                unload_priority.remove(model_name) # Elimină din lista de descărcare dacă a fost mutat
+
+        self._clear_gpu_memory() # Curăță după mutări
+
+        # 2. Dacă mutarea pe CPU nu a fost suficientă, descarcă modelele conform priorității
+        logger.info(f"Proactive: Attempting to unload models from: {unload_priority}")
+        for model_name in unload_priority:
+            if model_name in self.models: # Verifică dacă mai e încărcat
+                logger.warning(f"Proactively unloading '{model_name}' to free VRAM.")
+                self.unload_model(model_name)
+                current_cuda_info = self.get_memory_status().get("cuda_info", {})
+                free_vram_mb_pytorch = current_cuda_info.get("free_total_pytorch_perspective_gb", float('inf')) * 1024
+                if free_vram_mb_pytorch >= min_free_vram_mb:
+                    logger.info(f"Sufficient VRAM freed by unloading models: {free_vram_mb_pytorch:.0f}MB free.")
+                    self._clear_gpu_memory()
+                    return
+        logger.warning(f"Proactive freeing finished. Current free VRAM: {free_vram_mb_pytorch:.0f}MB.")
+        self._clear_gpu_memory()
+
 
     def optimize_for_inference(self) -> None:
         """
         Optimize memory usage before running the main inference process.
-        Call this before starting a pipeline.
+        Call this before starting a generation pipeline.
         """
-        # Check if we need to optimize
-        if not torch.cuda.is_available() or not getattr(self.config, "LOW_VRAM_MODE", False):
-            return
-        
         logger.info("Optimizing memory for inference...")
-        
-        # 1. Ensure main model is loaded and has priority
-        main_model = self.get_model('main')
-        if main_model is None:
-            logger.error("Main model not loaded!")
+        self._apply_model_loading_policy(model_name_to_load='main') # Descarcă tot ce nu e 'main' dacă politica o cere
+
+        main_model_instance = self.get_model('main') # Asigură încărcarea modelului principal
+        if main_model_instance is None or not (isinstance(main_model_instance, BaseModel) and main_model_instance.is_loaded): #type: ignore
+            logger.error("Main model not loaded or failed to load! Cannot optimize for inference.")
             return
-        
-        # 2. Unload unnecessary models
-        for model_name in list(self.models.keys()):
-            if model_name != 'main' and model_name not in getattr(self.config, "ESSENTIAL_MODELS", ["main"]):
-                self.unload_model(model_name)
-        
-        # 3. Clear CUDA cache
+
+        # Aplică optimizări specifice modelului principal (dacă e cazul și LOW_VRAM_MODE)
+        if getattr(self.config, "LOW_VRAM_MODE", False):
+            if isinstance(main_model_instance, BaseModel) and hasattr(main_model_instance, 'apply_low_vram_optimizations'):
+                logger.info("Applying LOW_VRAM_MODE optimizations to main model for inference.")
+                try:
+                    main_model_instance.apply_low_vram_optimizations() #type: ignore # Presupunem că modelele au această metodă
+                except Exception as e_opt:
+                    logger.error(f"Error applying low VRAM optimizations to main model: {e_opt}")
+            # Logica specifică pentru HiDream (dacă mai e relevantă) a fost mutată în clasa HiDreamModel.
+            # FluxModel are deja logica de CPU offload în metoda sa load() pentru LOW_VRAM_MODE.
+
         self._clear_gpu_memory()
-        
-        # 4. Apply memory reduction techniques to main model if it's HiDreamModel
-        main_model_obj = self.models['main']
-        if hasattr(main_model_obj, 'pipeline'):
-            try:
-                pipeline = main_model_obj.pipeline
-                
-                # Check if we can move text encoders to CPU
-                for component_name in ['text_encoder', 'text_encoder_2']:
-                    if hasattr(pipeline, component_name):
-                        component = getattr(pipeline, component_name)
-                        if component is not None and next(component.parameters(), None) is not None:
-                            device = next(component.parameters()).device
-                            if device.type == 'cuda':
-                                logger.info(f"Moving {component_name} to CPU to save VRAM")
-                                component.to('cpu')
-                
-                # Enable attention slicing if available
-                if hasattr(pipeline, 'enable_attention_slicing'):
-                    logger.info("Enabling attention slicing")
-                    pipeline.enable_attention_slicing()
-                    
-                # Enable VAE slicing if available
-                if hasattr(pipeline, 'enable_vae_slicing'):
-                    logger.info("Enabling VAE slicing")
-                    pipeline.enable_vae_slicing()
-                    
-                # Enable VAE tiling if enabled in config
-                if hasattr(pipeline, 'enable_vae_tiling') and getattr(self.config, 'ENABLE_VAE_TILING', False):
-                    logger.info("Enabling VAE tiling")
-                    pipeline.enable_vae_tiling()
-            except Exception as e:
-                logger.error(f"Error optimizing main model: {e}")
-        
-        logger.info("Memory optimization for inference completed")
+        logger.info("Memory optimization for inference completed.")
+        self._log_memory_stats()
+
 
     def handle_oom_error(self, func):
         """
         Decorator to handle OOM errors gracefully.
-        
-        Example usage:
-            @handle_oom_error
-            def load_model(self, model_name):
-                # Your code here
         """
         import functools
-        
+
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             try:
                 return func(*args, **kwargs)
             except RuntimeError as e:
-                if "CUDA out of memory" in str(e):
-                    logger.error(f"CUDA OOM in {func.__name__}: {str(e)}")
-                    # Try emergency recovery
-                    self.emergency_memory_recovery()
-                    # Retry with CPU fallback if possible
-                    try:
-                        # If there's a force_cpu parameter, set it to True
-                        if 'force_cpu' in kwargs:
-                            kwargs['force_cpu'] = True
-                        # If there's a device parameter, set it to 'cpu'
-                        if 'device' in kwargs:
-                            kwargs['device'] = 'cpu'
-                        logger.info(f"Retrying {func.__name__} with CPU fallback")
-                        return func(*args, **kwargs)
-                    except Exception as retry_e:
-                        logger.error(f"Retry failed in {func.__name__}: {str(retry_e)}")
-                        # Propagate the original error
-                        raise e
-                # Re-raise other errors
-                raise
-        
+                if "CUDA out of memory" in str(e) or "HIP out of memory" in str(e): # Suport și pt AMD ROCm
+                    logger.error(f"CUDA/HIP OOM error in '{func.__name__}': {str(e)}")
+                    self.emergency_memory_recovery() # Încearcă recuperarea de urgență
+
+                    # Logica de reîncercare cu CPU (opțional și dependent de funcție)
+                    # Aceasta ar trebui să fie specifică funcției decorate,
+                    # deoarece nu toate funcțiile pot rula pe CPU sau au parametri 'device'/'force_cpu'.
+                    # Aici doar semnalăm eroarea și faptul că s-a încercat recuperarea.
+                    # Re-aruncăm excepția pentru ca apelantul să știe că operațiunea a eșuat inițial.
+                    logger.warning(f"Operation '{func.__name__}' failed due to OOM. Recovery attempted. Consider retrying with CPU if applicable.")
+                    raise e # Re-aruncă excepția originală după încercarea de recuperare
+                else:
+                    # Re-aruncă alte erori RuntimeError care nu sunt OOM
+                    raise
+            except Exception as ex_other: # Prinde și alte excepții pentru logging
+                logger.error(f"Unexpected error in '{func.__name__}': {ex_other}", exc_info=True)
+                raise # Re-aruncă excepția
+
         return wrapper
 
-    # --- Enhanced Version of load_model_with_memory_management ---
-
-    def load_model_with_memory_management(self, model_name: str, model_params: Dict[str, Any] = None) -> Any:
-        """
-        Enhanced version with better memory handling and error recovery.
-        """
-        # If model is already loaded, return it
-        if model_name in self.models and self.models[model_name] is not None:
-            return self.models[model_name]
-        
-        # Initialize params if needed
-        model_params = model_params or {}
-        
-        # Check memory status and perform proactive cleanup if needed
-        if torch.cuda.is_available():
-            self.monitor_memory_and_recover()
-        
-        # Determine if we should use a lightweight variant
-        use_lightweight = getattr(self.config, "USE_LIGHTWEIGHT_MODELS", False)
-        if use_lightweight and model_name in getattr(self.config, "LIGHTWEIGHT_MODEL_KEYS", []):
-            logger.info(f"Using lightweight variant for {model_name}")
-            model_params['lightweight'] = True
-        
-        # Determine proper device (CPU or CUDA)
-        force_cpu = model_params.get('force_cpu', False)
-        if not force_cpu:
-            force_cpu = self._should_use_cpu_for_model(model_name)
-        
-        device = "cpu" if force_cpu else self.config.DEVICE
-        model_params['device'] = device
-        
-        logger.info(f"Loading {model_name} on {device}")
-        
-        try:
-            # Try to load the model
-            return self.get_model(model_name)
-        except RuntimeError as e:
-            if "CUDA out of memory" in str(e):
-                logger.error(f"CUDA OOM while loading {model_name}. Attempting recovery...")
-                
-                # Try emergency recovery
-                self.emergency_memory_recovery()
-                
-                # Retry with CPU
-                if device != "cpu":
-                    logger.info(f"Retrying {model_name} load on CPU")
-                    model_params['device'] = "cpu"
-                    model_params['force_cpu'] = True
-                    try:
-                        return self.get_model(model_name)
-                    except Exception as e2:
-                        logger.error(f"CPU fallback failed for {model_name}: {e2}")
-                
-                # If we got here, both attempts failed
-                raise RuntimeError(f"Could not load {model_name} due to memory constraints: {e}")
-            else:
-                # Re-raise other errors
-                raise
+    # load_model_with_memory_management nu mai este necesară dacă get_model și politicile sunt robuste.
+    # Am integrat logica similară în get_model și _apply_model_loading_policy / _free_memory_proactively.

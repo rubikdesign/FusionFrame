@@ -9,9 +9,20 @@ Enhanced with lightweight model alternatives and memory optimizations
 class ModelConfig:
     """Centralized configuration for AI models and their parameters."""
 
-    # --- Main and Backup Models ---
-    MAIN_MODEL = "HiDream-I1-Fast"
-    BACKUP_MODEL_NAME = "HiDream-I1-Full"
+
+
+    # Add to ModelConfig class in model_config.py
+    MAIN_MODEL = "FLUX.1-dev"  # Change from HiDream-I1-Fast
+    BACKUP_MODEL_NAME = "HiDream-I1-Fast"  # Make HiDream the backup
+
+    # Add FLUX configuration
+    FLUX_CONFIG = {
+        "pretrained_model_name_or_path": "black-forest-labs/FLUX.1-dev",
+        "vae_name_or_path": "stabilityai/sdxl-vae",
+        "use_safetensors": True,
+        "lora_weights": [],
+        "inference_steps": 30
+    }
 
     # --- Lightweight Model Alternatives ---
     # Use these models when in LOW_VRAM_MODE
@@ -35,21 +46,13 @@ class ModelConfig:
 
     # Main Model (HiDream-I1 Full)
     BACKUP_CONFIG = {
-        "pretrained_model_name_or_path": "HiDream-ai/HiDream-I1-Full",
-        "vae_name_or_path": "stabilityai/sdxl-vae",
-        "use_safetensors": True,
-        "lora_weights": [],
-        "inference_steps": 50
-    }
-
-    # Backup Model (HiDream-I1 Fast)
-    HIDREAM_CONFIG = {
         "pretrained_model_name_or_path": "HiDream-ai/HiDream-I1-Fast",
         "vae_name_or_path": "stabilityai/sdxl-vae",
         "use_safetensors": True,
         "lora_weights": [],
         "inference_steps": 16
     }
+
 
     # Refiner (SDXL)
     REFINER_CONFIG = {

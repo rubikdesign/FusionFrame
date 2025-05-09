@@ -2,12 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-Implementation for FLUX model in FusionFrame 2.0
+Enhanced Implementation for FLUX model in FusionFrame 2.0
+- Optimized for memory efficiency
+- Support for ControlNet and LoRA
+- Better error handling and memory management
 """
 
 import os
 import torch
 import logging
+import gc
+import time
 from typing import Dict, Any, Optional, List, Union, Tuple
 from PIL import Image
 import numpy as np
@@ -21,21 +26,21 @@ logger = logging.getLogger(__name__)
 
 class FluxModel(BaseModel):
     """
-    Implementation for FLUX model
+    Enhanced implementation for FLUX model
     
-    FLUX is an alternative editing model that
-    can be used when HiDream doesn't produce
-    optimal results.
+    FLUX is a lighter alternative to HiDream that doesn't require
+    LLama text encoders and uses significantly less GPU memory while
+    maintaining high-quality image generation capabilities.
     """
     
     def __init__(self, 
-                model_id: str = ModelConfig.BACKUP_MODEL, 
+                model_id: str = ModelConfig.MAIN_MODEL, 
                 device: Optional[str] = None):
         """
         Initialization for FLUX model
         
         Args:
-            model_id: Model identifier (default FLUX.1-dev)
+            model_id: Model identifier (default from ModelConfig.MAIN_MODEL)
             device: Device where the model will run (default from AppConfig)
         """
         super().__init__(model_id, device)
@@ -45,15 +50,23 @@ class FluxModel(BaseModel):
         self.controlnet = None
         self.pipeline = None
         self.lora_weights = []
+        self.is_loaded = False
     
     def load(self) -> bool:
         """
-        Load FLUX model
+        Load FLUX model with memory optimizations
         
         Returns:
             True if loading succeeded, False otherwise
         """
         logger.info(f"Loading FLUX model '{self.model_id}'")
+        start_time = time.time()
+        
+        # Clean GPU memory before loading
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+            logger.info(f"CUDA memory after cleanup: {torch.cuda.memory_allocated(self.device) / 1024**3:.2f} GB used, {torch.cuda.memory_reserved(self.device) / 1024**3:.2f} GB reserved")
         
         try:
             from diffusers import (
@@ -63,15 +76,18 @@ class FluxModel(BaseModel):
                 ControlNetModel
             )
             
-            # Load VAE
+            # 1. Load VAE
+            logger.info(f"Loading VAE from {self.config['vae_name_or_path']}...")
             self.vae = AutoencoderKL.from_pretrained(
                 self.config["vae_name_or_path"],
                 torch_dtype=AppConfig.DTYPE,
                 cache_dir=AppConfig.CACHE_DIR
             ).to(self.device)
+            logger.info("VAE loaded successfully.")
             
-            # Load ControlNet if configured
-            if ModelConfig.CONTROLNET_CONFIG:
+            # 2. Load ControlNet if configured
+            if ModelConfig.CONTROLNET_CONFIG and ModelConfig.CONTROLNET_CONFIG.get("model_id"):
+                logger.info(f"Loading ControlNet from {ModelConfig.CONTROLNET_CONFIG['model_id']}...")
                 try:
                     self.controlnet = ControlNetModel.from_pretrained(
                         ModelConfig.CONTROLNET_CONFIG["model_id"],
@@ -80,63 +96,172 @@ class FluxModel(BaseModel):
                         variant="fp16" if AppConfig.DTYPE == torch.float16 else None,
                         cache_dir=AppConfig.CACHE_DIR
                     ).to(self.device)
-                except Exception as e:
-                    logger.error(f"Error loading ControlNet: {e}")
-                    logger.info("Continuing without ControlNet")
+                    logger.info("ControlNet loaded successfully.")
+                except Exception as e_ctrl:
+                    logger.warning(f"ControlNet download/load failed: {e_ctrl}, continuing without it.")
+                    self.controlnet = None
+            else:
+                logger.info("ControlNet not configured or model_id missing.")
+                self.controlnet = None
             
-            # Load main pipeline
+            # 3. Load main pipeline
+            logger.info(f"Loading FLUX pipeline from {self.config['pretrained_model_name_or_path']}...")
+            
+            # Prepare pipeline parameters
+            pipeline_kwargs = {
+                "vae": self.vae,
+                "torch_dtype": AppConfig.DTYPE,
+                "variant": "fp16" if AppConfig.DTYPE == torch.float16 else None,
+                "use_safetensors": self.config.get("use_safetensors", True),
+                "cache_dir": AppConfig.CACHE_DIR
+            }
+            
+            if self.controlnet:
+                pipeline_kwargs["controlnet"] = self.controlnet
+            
             self.pipeline = StableDiffusionXLInpaintPipeline.from_pretrained(
                 self.config["pretrained_model_name_or_path"],
-                vae=self.vae,
-                torch_dtype=AppConfig.DTYPE,
-                variant="fp16" if AppConfig.DTYPE == torch.float16 else None,
-                use_safetensors=self.config["use_safetensors"],
-                cache_dir=AppConfig.CACHE_DIR
+                **pipeline_kwargs
             )
+            logger.info("FLUX pipeline loaded successfully.")
             
-            # Add controlnet to pipeline if available
-            if self.controlnet is not None:
-                self.pipeline.controlnet = self.controlnet
-            
-            # Optimizations for low VRAM
+            # 4. Apply memory optimizations
             if AppConfig.LOW_VRAM_MODE:
-                self.pipeline.enable_model_cpu_offload()
+                logger.info("Applying LOW_VRAM_MODE optimizations")
+                
+                # Move text encoders to CPU to save VRAM
+                if hasattr(self.pipeline, "text_encoder") and self.pipeline.text_encoder is not None:
+                    try:
+                        self.pipeline.text_encoder.to("cpu")
+                        logger.info("Moved text_encoder to CPU")
+                    except Exception as e_te:
+                        logger.warning(f"Could not move text_encoder to CPU: {e_te}")
+                
+                if hasattr(self.pipeline, "text_encoder_2") and self.pipeline.text_encoder_2 is not None:
+                    try:
+                        self.pipeline.text_encoder_2.to("cpu")
+                        logger.info("Moved text_encoder_2 to CPU")
+                    except Exception as e_te2:
+                        logger.warning(f"Could not move text_encoder_2 to CPU: {e_te2}")
+                
+                # Enable VAE slicing to save memory
+                try:
+                    logger.info("Enabling VAE slicing for memory optimization.")
+                    self.pipeline.enable_vae_slicing()
+                    logger.info("VAE slicing enabled.")
+                except Exception as e_vae_slice:
+                    logger.warning(f"Could not enable VAE slicing: {e_vae_slice}")
+                
+                # Enable attention slicing
+                if hasattr(self.pipeline, "enable_attention_slicing"):
+                    try:
+                        logger.info("Enabling attention slicing.")
+                        self.pipeline.enable_attention_slicing()
+                        logger.info("Attention slicing enabled.")
+                    except Exception as e_attn:
+                        logger.warning(f"Could not enable attention slicing: {e_attn}")
+                
+                # Enable tiling for large images if configured
+                if hasattr(AppConfig, 'ENABLE_VAE_TILING') and AppConfig.ENABLE_VAE_TILING:
+                    try:
+                        logger.info("Enabling VAE tiling for large images.")
+                        self.pipeline.enable_vae_tiling()
+                        logger.info("VAE tiling enabled.")
+                    except Exception as e_tiling:
+                        logger.warning(f"Could not enable VAE tiling: {e_tiling}")
+                
+                # Move model components to device
+                logger.info(f"Moving remaining FLUX pipeline components to {self.device}")
+                try:
+                    # Move UNet to device (text encoders remain on CPU)
+                    if hasattr(self.pipeline, "unet"):
+                        self.pipeline.unet.to(self.device)
+                    else:
+                        # Fallback if UNet not directly accessible
+                        self.pipeline.to(self.device)
+                except Exception as e_device:
+                    logger.error(f"Error moving pipeline components to device: {e_device}")
             else:
+                # If not LOW_VRAM_MODE, move everything to device
+                logger.info(f"Moving FLUX pipeline to {self.device}")
                 self.pipeline.to(self.device)
             
-            # Set scheduler for FLUX
-            self.pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
-                self.pipeline.scheduler.config
-            )
+            # 5. Configure optimized scheduler
+            logger.info("Configuring EulerAncestralDiscreteScheduler for better results.")
+            try:
+                self.pipeline.scheduler = EulerAncestralDiscreteScheduler.from_config(
+                    self.pipeline.scheduler.config
+                )
+                logger.info("Scheduler configured as EulerAncestralDiscreteScheduler.")
+            except Exception as e_scheduler:
+                logger.warning(f"Failed to set EulerAncestralDiscreteScheduler: {e_scheduler}. Using default scheduler.")
             
-            # Load configured LoRAs
-            if self.config["lora_weights"]:
+            # 6. Load configured LoRAs (if present)
+            if self.config.get("lora_weights"):
                 self._load_loras()
             
             self.model = self.pipeline
             self.is_loaded = True
-            logger.info(f"FLUX model '{self.model_id}' loaded successfully")
+            
+            # Log total loading time
+            load_time = time.time() - start_time
+            logger.info(f"FLUX model '{self.model_id}' loaded successfully in {load_time:.2f} seconds.")
+            
+            # Log memory usage after loading
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated(self.device) / (1024**3)
+                reserved = torch.cuda.memory_reserved(self.device) / (1024**3)
+                logger.info(f"CUDA memory after loading: {allocated:.2f} GB allocated, {reserved:.2f} GB reserved")
+            
             return True
             
+        except ImportError as ie:
+            logger.error(f"ImportError during FLUX model loading: {ie}. "
+                         "Ensure 'diffusers' is installed correctly.", exc_info=True)
+            self.is_loaded = False
+            return False
         except Exception as e:
-            logger.error(f"Error loading FLUX model '{self.model_id}': {str(e)}")
+            logger.error(f"Error loading FLUX model '{self.model_id}': {str(e)}", exc_info=True)
             self.is_loaded = False
             return False
     
     def _load_loras(self) -> None:
         """Load configured LoRAs"""
-        for lora_info in self.config["lora_weights"]:
+        if not self.pipeline:
+            logger.warning("Main pipeline not loaded, cannot load LoRAs.")
+            return
+
+        logger.info("Loading LoRA weights...")
+        for lora_info in self.config.get("lora_weights", []):
+            lora_path = lora_info.get("path")
+            lora_name = lora_info.get("name", os.path.basename(lora_path) if lora_path else "unknown_lora")
+            weight_name = lora_info.get("weight_name")
+
+            if not lora_path:
+                logger.warning(f"Skipping LoRA '{lora_name}' due to missing path.")
+                continue
+            
+            logger.info(f"Loading LoRA '{lora_name}' from path '{lora_path}'.")
             try:
-                # Load LoRA
                 self.pipeline.load_lora_weights(
-                    lora_info["path"],
-                    adapter_name=lora_info.get("name", os.path.basename(lora_info["path"])),
-                    weight_name=lora_info.get("weight_name")
+                    lora_path,
+                    adapter_name=lora_name,
+                    weight_name=weight_name
                 )
                 self.lora_weights.append(lora_info)
-                logger.info(f"LoRA '{lora_info.get('name')}' loaded successfully")
+                logger.info(f"LoRA '{lora_name}' loaded successfully")
             except Exception as e:
-                logger.error(f"Error loading LoRA '{lora_info.get('name')}': {str(e)}")
+                logger.error(f"Error loading LoRA '{lora_name}': {str(e)}")
+        
+        if self.lora_weights:
+            # Set active LoRAs
+            active_adapters = [lora.get("name", os.path.basename(lora.get("path"))) for lora in self.lora_weights]
+            adapter_weights = [lora.get("weight", 1.0) for lora in self.lora_weights]
+            try:
+                self.pipeline.set_adapters(active_adapters, adapter_weights=adapter_weights)
+                logger.info(f"Set active LoRA adapters: {active_adapters} with weights: {adapter_weights}")
+            except Exception as e_set_adapters:
+                logger.error(f"Failed to set active LoRA adapters: {e_set_adapters}")
     
     def unload(self) -> bool:
         """
@@ -146,25 +271,73 @@ class FluxModel(BaseModel):
             True if unloading succeeded, False otherwise
         """
         if not self.is_loaded:
+            logger.info("Model already unloaded or was never loaded.")
             return True
             
+        logger.info(f"Unloading FLUX model '{self.model_id}'...")
+        
         try:
             # Unload components
+            del self.pipeline
+            del self.vae
+            if self.controlnet:
+                del self.controlnet
+            
+            self.pipeline = None
             self.vae = None
             self.controlnet = None
-            self.pipeline = None
             self.model = None
             
             # Clear memory
-            torch.cuda.empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+                logger.info("CUDA cache emptied.")
             
             self.is_loaded = False
-            logger.info(f"FLUX model '{self.model_id}' unloaded successfully")
+            logger.info(f"FLUX model '{self.model_id}' unloaded successfully.")
             return True
             
         except Exception as e:
             logger.error(f"Error unloading FLUX model '{self.model_id}': {str(e)}")
             return False
+    
+    # Emergency cleanup for OOM situations
+    def emergency_cleanup(self) -> None:
+        """
+        Aggressive memory cleanup for OOM (Out of Memory) emergencies
+        """
+        logger.warning(f"Performing emergency memory cleanup for FLUX model '{self.model_id}'")
+        
+        # Move components to CPU
+        if self.pipeline:
+            # Move text encoders to CPU
+            if hasattr(self.pipeline, "text_encoder") and self.pipeline.text_encoder is not None:
+                try:
+                    self.pipeline.text_encoder.to("cpu")
+                    logger.info("Emergency: Moved text_encoder to CPU")
+                except Exception as e_te:
+                    logger.warning(f"Could not move text_encoder to CPU: {e_te}")
+                
+            if hasattr(self.pipeline, "text_encoder_2") and self.pipeline.text_encoder_2 is not None:
+                try:
+                    self.pipeline.text_encoder_2.to("cpu")
+                    logger.info("Emergency: Moved text_encoder_2 to CPU")
+                except Exception as e_te2:
+                    logger.warning(f"Could not move text_encoder_2 to CPU: {e_te2}")
+        
+        # Clear cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+            
+        logger.info("Emergency cleanup completed")
+        
+        # Log memory state after cleanup
+        if torch.cuda.is_available():
+            allocated_gb = torch.cuda.memory_allocated(self.device) / (1024**3)
+            reserved_gb = torch.cuda.memory_reserved(self.device) / (1024**3)
+            logger.info(f"CUDA memory after emergency cleanup: {allocated_gb:.2f} GB allocated, {reserved_gb:.2f} GB reserved")
     
     def process(self, 
                image: Union[Image.Image, np.ndarray],
@@ -172,9 +345,10 @@ class FluxModel(BaseModel):
                prompt: str,
                negative_prompt: Optional[str] = None,
                strength: float = 0.75,
-               num_inference_steps: int = 50,
+               num_inference_steps: Optional[int] = None,
                guidance_scale: float = 7.5,
                controlnet_conditioning_scale: Optional[float] = None,
+               seed: int = 42,
                **kwargs) -> Dict[str, Any]:
         """
         Process image using FLUX model
@@ -188,73 +362,163 @@ class FluxModel(BaseModel):
             num_inference_steps: Number of inference steps
             guidance_scale: Guidance scale factor
             controlnet_conditioning_scale: ControlNet conditioning scale
+            seed: Random seed
             **kwargs: Additional pipeline arguments
             
         Returns:
             Dictionary with processing results
         """
         if not self.is_loaded:
+            logger.warning("Model not loaded. Attempting to load...")
             if not self.load():
-                logger.error(f"Cannot process: model '{self.model_id}' failed to load")
-                return {
-                    'result': image,
-                    'success': False,
-                    'message': f"Model '{self.model_id}' failed to load"
-                }
+                return {"result": image, "success": False, "message": "Model failed to load on demand."}
         
-        # Convert image to PIL if numpy array
-        if isinstance(image, np.ndarray):
-            image_pil = Image.fromarray(image)
+        if not self.pipeline:
+            return {"result": image, "success": False, "message": "Pipeline not available."}
+        
+        # Measure processing time
+        start_time = time.time()
+
+        # Convert input to correct format
+        image_pil = Image.fromarray(image) if isinstance(image, np.ndarray) else image.convert("RGB")
+        mask_pil = Image.fromarray(mask_image) if isinstance(mask_image, np.ndarray) else mask_image.convert("L")
+        
+        # Resize images if in LOW_VRAM_MODE and they're too large
+        if AppConfig.LOW_VRAM_MODE:
+            max_dim = 1024  # Maximum dimension in LOW_VRAM_MODE
+            img_w, img_h = image_pil.size
+            
+            if max(img_w, img_h) > max_dim:
+                # Calculate new dimensions preserving aspect ratio
+                if img_w > img_h:
+                    new_w, new_h = max_dim, int(img_h * max_dim / img_w)
+                else:
+                    new_w, new_h = int(img_w * max_dim / img_h), max_dim
+                    
+                # Resize image and mask
+                logger.warning(f"Image too large in LOW_VRAM_MODE. Resizing from {img_w}x{img_h} to {new_w}x{new_h}")
+                image_pil = image_pil.resize((new_w, new_h), Image.LANCZOS)
+                mask_pil = mask_pil.resize((new_w, new_h), Image.NEAREST)
+        
+        # Configure generator for reproducibility
+        generator = torch.Generator(device=self.device).manual_seed(seed)
+        
+        # Adjust parameters for LOW_VRAM_MODE
+        if AppConfig.LOW_VRAM_MODE and hasattr(ModelConfig, "LOW_VRAM_INFERENCE_STEPS"):
+            effective_num_inference_steps = ModelConfig.LOW_VRAM_INFERENCE_STEPS.get(self.model_id, 30)
+            logger.info(f"Using reduced inference steps in LOW_VRAM_MODE: {effective_num_inference_steps}")
         else:
-            image_pil = image
-        
-        # Convert mask to PIL if numpy array
-        if isinstance(mask_image, np.ndarray):
-            mask_pil = Image.fromarray(mask_image)
-        else:
-            mask_pil = mask_image
-        
-        # Prepare parameters
-        generator = torch.Generator(device=self.device).manual_seed(kwargs.get('seed', 42))
+            effective_num_inference_steps = (
+                num_inference_steps
+                if num_inference_steps is not None
+                else self.config.get("inference_steps", ModelConfig.GENERATION_PARAMS["default_steps"])
+            )
         
         # Set default negative prompt if not provided
-        if negative_prompt is None:
-            negative_prompt = ModelConfig.GENERATION_PARAMS["negative_prompt"]
+        effective_negative_prompt = negative_prompt if negative_prompt is not None else ModelConfig.GENERATION_PARAMS.get("negative_prompt", "")
         
-        # Prepare controlnet arguments if available
-        controlnet_args = {}
-        if self.controlnet is not None and controlnet_conditioning_scale is not None:
-            controlnet_args["controlnet_conditioning_scale"] = controlnet_conditioning_scale
+        # Prepare pipeline arguments
+        pipeline_args = {
+            "prompt": prompt,
+            "negative_prompt": effective_negative_prompt,
+            "image": image_pil,
+            "mask_image": mask_pil,
+            "num_inference_steps": effective_num_inference_steps,
+            "guidance_scale": guidance_scale,
+            "strength": strength,
+            "generator": generator,
+        }
+        
+        # Add ControlNet parameters if available
+        if self.controlnet and controlnet_conditioning_scale is not None:
+            pipeline_args["controlnet_conditioning_scale"] = controlnet_conditioning_scale
+            logger.info(f"Using ControlNet with scale: {controlnet_conditioning_scale}")
+        
+        # Add any additional parameters
+        pipeline_args.update(kwargs)
+        
+        # Log memory state before inference
+        if torch.cuda.is_available():
+            allocated_before = torch.cuda.memory_allocated(self.device) / (1024**3)
+            reserved_before = torch.cuda.memory_reserved(self.device) / (1024**3)
+            logger.info(f"CUDA memory before inference: {allocated_before:.2f} GB allocated, {reserved_before:.2f} GB reserved")
         
         try:
-            # Generate result
-            result = self.pipeline(
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                image=image_pil,
-                mask_image=mask_pil,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                strength=strength,
-                generator=generator,
-                **controlnet_args,
-                **kwargs
-            )
+            # Clean memory before inference
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
             
-            # Return result
+            logger.info(f"Processing with FLUX. Steps: {effective_num_inference_steps}, Guidance: {guidance_scale}, Strength: {strength}")
+            
+            # Run inference
+            result = self.pipeline(**pipeline_args)
+            result_img = result.images[0]
+            
+            # Measure total processing time
+            proc_time = time.time() - start_time
+            logger.info(f"Processing completed successfully in {proc_time:.2f} seconds")
+            
+            # Log memory state after inference
+            if torch.cuda.is_available():
+                allocated_after = torch.cuda.memory_allocated(self.device) / (1024**3)
+                reserved_after = torch.cuda.memory_reserved(self.device) / (1024**3)
+                logger.info(f"CUDA memory after inference: {allocated_after:.2f} GB allocated, {reserved_after:.2f} GB reserved")
+                logger.info(f"Memory change during inference: {allocated_after-allocated_before:.2f} GB")
+            
             return {
-                'result': result.images[0],
+                'result': result_img,
                 'success': True,
-                'message': "Processing completed successfully"
+                'message': f"Processing completed successfully in {proc_time:.2f}s"
             }
             
+        except RuntimeError as e:
+            error_msg = str(e)
+            if "CUDA out of memory" in error_msg:
+                logger.error(f"CUDA out of memory during inference: {error_msg}")
+                
+                # Try recovery with emergency cleanup
+                logger.warning("Attempting emergency cleanup and retry with reduced parameters")
+                self.emergency_cleanup()
+                
+                # Reduce parameters for retry
+                reduced_steps = max(20, effective_num_inference_steps // 2)
+                reduced_guidance = min(7.0, guidance_scale)
+                
+                try:
+                    # Prepare arguments for retry
+                    retry_args = pipeline_args.copy()
+                    retry_args["num_inference_steps"] = reduced_steps
+                    retry_args["guidance_scale"] = reduced_guidance
+                    
+                    logger.info(f"Retrying with reduced parameters: steps={reduced_steps}, guidance={reduced_guidance}")
+                    
+                    # Retry processing
+                    result = self.pipeline(**retry_args)
+                    result_img = result.images[0]
+                    
+                    proc_time = time.time() - start_time
+                    logger.info(f"Processing completed with reduced parameters in {proc_time:.2f} seconds")
+                    
+                    return {
+                        "result": result_img, 
+                        "success": True, 
+                        "message": f"Processing completed with reduced parameters (steps={reduced_steps}) in {proc_time:.2f}s"
+                    }
+                except Exception as retry_e:
+                    logger.error(f"Retry failed: {retry_e}")
+                    return {
+                        "result": image_pil, 
+                        "success": False, 
+                        "message": f"CUDA out of memory. Emergency retry also failed: {retry_e}"
+                    }
+            else:
+                # Other types of errors
+                logger.error(f"Processing error: {e}", exc_info=True)
+                return {"result": image_pil, "success": False, "message": str(e)}
         except Exception as e:
-            logger.error(f"Error processing with FLUX model '{self.model_id}': {str(e)}")
-            return {
-                'result': image_pil,
-                'success': False,
-                'message': f"Error: {str(e)}"
-            }
+            logger.error(f"Processing error: {e}", exc_info=True)
+            return {"result": image_pil, "success": False, "message": str(e)}
     
     def get_info(self) -> Dict[str, Any]:
         """
@@ -270,7 +534,13 @@ class FluxModel(BaseModel):
             "config": self.config,
             "has_controlnet": self.controlnet is not None,
             "lora_weights": self.lora_weights,
-            "vram_usage": torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
+            "device": self.device,
+            "dtype": str(AppConfig.DTYPE),
+            "low_vram_mode": AppConfig.LOW_VRAM_MODE,
         })
         
+        if torch.cuda.is_available():
+            info["vram_allocated_gb"] = round(torch.cuda.memory_allocated(self.device) / (1024**3), 2)
+            info["vram_reserved_gb"] = round(torch.cuda.memory_reserved(self.device) / (1024**3), 2)
+            
         return info

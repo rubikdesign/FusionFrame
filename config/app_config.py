@@ -110,8 +110,9 @@ class AppConfig:
         "gpen": "https://github.com/yangxy/GPEN/releases/download/v1.0/GPEN-BFR-512.pth",
         "codeformer": "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth",
         "esrgan": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
-        # Adding URLs for HiDream-I1 models if needed
-        "hidream-i1": "https://huggingface.co/HiDream-ai/HiDream-I1-Full/resolve/main/pytorch_model.safetensors",
+        # Adding URL for FLUX model if needed
+        "flux": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors",
+        "hidream-i1": "https://huggingface.co/HiDream-ai/HiDream-I1-Fast/resolve/main/pytorch_model.safetensors",
     }
     
     # Quality and generation parameters
