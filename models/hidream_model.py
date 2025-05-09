@@ -70,7 +70,7 @@ class HiDreamModel(BaseModel):
     def load(self) -> bool:
         logger.info(f"Loading HiDream model '{self.model_id}' with refiner={self.use_refiner}")
         PipelineClass = DiffusionPipeline # Initialize with fallback
-
+        self.controlnet = None
         # Adăugare cod pentru RMSNorm custom
         try:
             # RMSNorm necesar pentru modelele HiDream
