@@ -548,26 +548,6 @@ class ModelManager:
         else:
             logger.debug(f"Unload: Model '{model_name}' not found.")
 
-    def load_model_with_memory_management(self, model_name: str) -> Any:
-        """Încarcă un model cu gestionare inteligentă a memoriei."""
-        # Dacă modelul este deja încărcat, îl returnăm
-        if model_name in self.models and self.models[model_name] is not None:
-            return self.models[model_name]
-            
-        # Verificăm dacă este un model secundar și avem memorie puțină
-        if model_name in self.CPU_FRIENDLY_MODELS and self._is_memory_critical():
-            # Descărcăm toate modelele secundare încărcate care nu sunt utilizate în prezent
-            for unload_key in self.CPU_FRIENDLY_MODELS:
-                if unload_key != model_name and unload_key in self.models:
-                    logger.info(f"Memory pressure detected. Unloading model '{unload_key}' to free memory")
-                    self.unload_model(unload_key)
-        
-        # Eliberăm memoria înainte de a încărca modelul
-        self._clear_gpu_memory()
-        
-        # Încarcă modelul folosind loader-ul specific
-        return self.get_model(model_name)
-
     def get_model(self, model_name: str) -> Any:
         """Obține un model, încărcându-l leneș."""
         if model_name in self.models and self.models[model_name] is not None:
@@ -622,3 +602,360 @@ class ModelManager:
         if final_model is None:
             logger.error(f"Failed to load model '{model_name}'.")
         return final_model
+    
+    def get_memory_status(self) -> Dict[str, Any]:
+
+        memory_info = {
+            "cuda_available": torch.cuda.is_available(),
+            "loaded_models": list(self.models.keys()),
+            "system_ram_available_gb": 0,
+            "cuda_info": {}
+        }
+    
+        # System RAM info
+        try:
+            import psutil
+            memory_info["system_ram_available_gb"] = psutil.virtual_memory().available / (1024**3)
+            memory_info["system_ram_percent"] = psutil.virtual_memory().percent
+        except ImportError:
+            pass
+        
+        # CUDA memory info
+        if torch.cuda.is_available():
+            try:
+                current_device = torch.cuda.current_device()
+                device_name = torch.cuda.get_device_name(current_device)
+                total_memory = torch.cuda.get_device_properties(current_device).total_memory
+                allocated_memory = torch.cuda.memory_allocated(current_device)
+                reserved_memory = torch.cuda.memory_reserved(current_device)
+                free_memory = total_memory - allocated_memory
+                
+                memory_info["cuda_info"] = {
+                    "device_name": device_name,
+                    "current_device": current_device,
+                    "total_memory_gb": total_memory / (1024**3),
+                    "allocated_memory_gb": allocated_memory / (1024**3),
+                    "reserved_memory_gb": reserved_memory / (1024**3),
+                    "free_memory_gb": free_memory / (1024**3),
+                    "percent_used": (allocated_memory / total_memory) * 100,
+                    "is_memory_critical": (free_memory / total_memory) < 0.1  # Less than 10% free
+                }
+            except Exception as e:
+                logger.error(f"Error getting CUDA memory status: {e}")
+        
+        return memory_info
+
+    def emergency_memory_recovery(self) -> bool:
+        """
+        Perform emergency memory recovery when CUDA out-of-memory occurs.
+        
+        Returns:
+            True if recovery actions were taken, False otherwise
+        """
+        if not torch.cuda.is_available():
+            return False
+        
+        logger.warning("Performing emergency memory recovery")
+        
+        # 1. Move non-essential models to CPU
+        for model_name in list(self.models.keys()):
+            if model_name in self.CPU_FRIENDLY_MODELS and model_name not in self.ESSENTIAL_GPU_MODELS:
+                self._move_model_to_cpu(model_name)
+        
+        # 2. Unload all non-essential models
+        essential_models = getattr(self.config, "ESSENTIAL_MODELS", ["main"])
+        for model_name in list(self.models.keys()):
+            if model_name not in essential_models:
+                logger.info(f"Emergency unloading model: {model_name}")
+                self.unload_model(model_name)
+        
+        # 3. Force garbage collection and cache clearing
+        self._clear_gpu_memory()
+        
+        # 4. Return success
+        return True
+
+    def _move_model_to_cpu(self, model_name: str) -> bool:
+        """
+        Move a model from GPU to CPU to free VRAM.
+        
+        Args:
+            model_name: Name of the model to move
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        if model_name not in self.models:
+            return False
+        
+        model_obj = self.models[model_name]
+        
+        try:
+            # Handle dictionary case (processor + model)
+            if isinstance(model_obj, dict) and "model" in model_obj:
+                model = model_obj["model"]
+                if hasattr(model, "to") and callable(model.to):
+                    logger.info(f"Moving {model_name} to CPU")
+                    model.to("cpu")
+                    model_obj["device"] = "cpu"
+                    return True
+            # Handle direct model case
+            elif hasattr(model_obj, "to") and callable(model_obj.to):
+                logger.info(f"Moving {model_name} to CPU")
+                model_obj.to("cpu")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error moving {model_name} to CPU: {e}")
+            return False
+
+    def monitor_memory_and_recover(self) -> None:
+        """
+        Monitor memory usage and perform recovery actions if needed.
+        Call this method periodically in long-running operations.
+        """
+        if not torch.cuda.is_available():
+            return
+        
+        try:
+            mem_status = self.get_memory_status()
+            cuda_info = mem_status.get("cuda_info", {})
+            
+            # Check if memory is critical
+            if cuda_info.get("is_memory_critical", False):
+                logger.warning(f"CRITICAL MEMORY STATE: {cuda_info.get('free_memory_gb', 0):.2f}GB free, "
+                            f"{cuda_info.get('percent_used', 0):.1f}% used")
+                
+                # Identify models that can be moved to CPU or unloaded
+                self._free_memory_proactively()
+        except Exception as e:
+            logger.error(f"Error in memory monitoring: {e}")
+
+    def _free_memory_proactively(self) -> None:
+        """
+        Proactively free memory when approaching critical levels.
+        """
+        # Get minimum free VRAM threshold from config
+        min_free_vram_mb = getattr(self.config, "MIN_FREE_VRAM_MB", 1000)
+        
+        # Check current free VRAM
+        free_vram_mb = 0
+        if torch.cuda.is_available():
+            free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+            free_vram_mb = free_memory / (1024 * 1024)
+        
+        # If we have enough free VRAM, nothing to do
+        if free_vram_mb >= min_free_vram_mb:
+            return
+        
+        logger.warning(f"Low VRAM: {free_vram_mb:.0f}MB free (below {min_free_vram_mb}MB threshold)")
+        
+        # Define unload priority (least important first)
+        unload_priority = [
+            'depth_estimator',  # Heavy but not critical
+            'image_classifier', # Useful but not critical
+            'yolo',             # Object detector - heavy
+            'clipseg',          # Used only for mask generation
+            'sam_predictor',    # Very heavy, used for segmentation
+            'gpen',             # Used only for face enhancement
+            'esrgan',           # Used only for detail enhancement
+            'codeformer',       # Used only for face enhancement
+            'rembg',            # Used for background removal
+            'mediapipe',        # Lightweight media processor
+            'face_detector',    # Lightweight detector
+        ]
+        
+        # Remove essential models from unload priority
+        essential_models = getattr(self.config, "ESSENTIAL_MODELS", ["main"])
+        unload_priority = [m for m in unload_priority if m not in essential_models]
+        
+        # First try to move models to CPU
+        for model_name in unload_priority:
+            if model_name in self.models:
+                # Skip if it's already at an equivalent memory state
+                if isinstance(self.models[model_name], dict) and self.models[model_name].get("device") == "cpu":
+                    continue
+                    
+                # Try to move the model to CPU
+                if self._move_model_to_cpu(model_name):
+                    logger.info(f"Moved {model_name} to CPU to reduce VRAM usage")
+                    
+                    # Check if we've freed enough memory
+                    if torch.cuda.is_available():
+                        free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                        free_vram_mb = free_memory / (1024 * 1024)
+                        if free_vram_mb >= min_free_vram_mb:
+                            logger.info(f"Successfully freed memory by moving models to CPU: {free_vram_mb:.0f}MB free")
+                            return
+        
+        # If moving to CPU wasn't enough, unload models
+        for model_name in unload_priority:
+            if model_name in self.models:
+                logger.info(f"Unloading {model_name} to free memory")
+                self.unload_model(model_name)
+                
+                # Check if we've freed enough memory
+                if torch.cuda.is_available():
+                    free_memory = torch.cuda.get_device_properties(0).total_memory - torch.cuda.memory_allocated()
+                    free_vram_mb = free_memory / (1024 * 1024)
+                    if free_vram_mb >= min_free_vram_mb:
+                        logger.info(f"Successfully freed memory by unloading models: {free_vram_mb:.0f}MB free")
+                        return
+
+    def optimize_for_inference(self) -> None:
+        """
+        Optimize memory usage before running the main inference process.
+        Call this before starting a pipeline.
+        """
+        # Check if we need to optimize
+        if not torch.cuda.is_available() or not getattr(self.config, "LOW_VRAM_MODE", False):
+            return
+        
+        logger.info("Optimizing memory for inference...")
+        
+        # 1. Ensure main model is loaded and has priority
+        main_model = self.get_model('main')
+        if main_model is None:
+            logger.error("Main model not loaded!")
+            return
+        
+        # 2. Unload unnecessary models
+        for model_name in list(self.models.keys()):
+            if model_name != 'main' and model_name not in getattr(self.config, "ESSENTIAL_MODELS", ["main"]):
+                self.unload_model(model_name)
+        
+        # 3. Clear CUDA cache
+        self._clear_gpu_memory()
+        
+        # 4. Apply memory reduction techniques to main model if it's HiDreamModel
+        main_model_obj = self.models['main']
+        if hasattr(main_model_obj, 'pipeline'):
+            try:
+                pipeline = main_model_obj.pipeline
+                
+                # Check if we can move text encoders to CPU
+                for component_name in ['text_encoder', 'text_encoder_2']:
+                    if hasattr(pipeline, component_name):
+                        component = getattr(pipeline, component_name)
+                        if component is not None and next(component.parameters(), None) is not None:
+                            device = next(component.parameters()).device
+                            if device.type == 'cuda':
+                                logger.info(f"Moving {component_name} to CPU to save VRAM")
+                                component.to('cpu')
+                
+                # Enable attention slicing if available
+                if hasattr(pipeline, 'enable_attention_slicing'):
+                    logger.info("Enabling attention slicing")
+                    pipeline.enable_attention_slicing()
+                    
+                # Enable VAE slicing if available
+                if hasattr(pipeline, 'enable_vae_slicing'):
+                    logger.info("Enabling VAE slicing")
+                    pipeline.enable_vae_slicing()
+                    
+                # Enable VAE tiling if enabled in config
+                if hasattr(pipeline, 'enable_vae_tiling') and getattr(self.config, 'ENABLE_VAE_TILING', False):
+                    logger.info("Enabling VAE tiling")
+                    pipeline.enable_vae_tiling()
+            except Exception as e:
+                logger.error(f"Error optimizing main model: {e}")
+        
+        logger.info("Memory optimization for inference completed")
+
+    def handle_oom_error(self, func):
+        """
+        Decorator to handle OOM errors gracefully.
+        
+        Example usage:
+            @handle_oom_error
+            def load_model(self, model_name):
+                # Your code here
+        """
+        import functools
+        
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except RuntimeError as e:
+                if "CUDA out of memory" in str(e):
+                    logger.error(f"CUDA OOM in {func.__name__}: {str(e)}")
+                    # Try emergency recovery
+                    self.emergency_memory_recovery()
+                    # Retry with CPU fallback if possible
+                    try:
+                        # If there's a force_cpu parameter, set it to True
+                        if 'force_cpu' in kwargs:
+                            kwargs['force_cpu'] = True
+                        # If there's a device parameter, set it to 'cpu'
+                        if 'device' in kwargs:
+                            kwargs['device'] = 'cpu'
+                        logger.info(f"Retrying {func.__name__} with CPU fallback")
+                        return func(*args, **kwargs)
+                    except Exception as retry_e:
+                        logger.error(f"Retry failed in {func.__name__}: {str(retry_e)}")
+                        # Propagate the original error
+                        raise e
+                # Re-raise other errors
+                raise
+        
+        return wrapper
+
+    # --- Enhanced Version of load_model_with_memory_management ---
+
+    def load_model_with_memory_management(self, model_name: str, model_params: Dict[str, Any] = None) -> Any:
+        """
+        Enhanced version with better memory handling and error recovery.
+        """
+        # If model is already loaded, return it
+        if model_name in self.models and self.models[model_name] is not None:
+            return self.models[model_name]
+        
+        # Initialize params if needed
+        model_params = model_params or {}
+        
+        # Check memory status and perform proactive cleanup if needed
+        if torch.cuda.is_available():
+            self.monitor_memory_and_recover()
+        
+        # Determine if we should use a lightweight variant
+        use_lightweight = getattr(self.config, "USE_LIGHTWEIGHT_MODELS", False)
+        if use_lightweight and model_name in getattr(self.config, "LIGHTWEIGHT_MODEL_KEYS", []):
+            logger.info(f"Using lightweight variant for {model_name}")
+            model_params['lightweight'] = True
+        
+        # Determine proper device (CPU or CUDA)
+        force_cpu = model_params.get('force_cpu', False)
+        if not force_cpu:
+            force_cpu = self._should_use_cpu_for_model(model_name)
+        
+        device = "cpu" if force_cpu else self.config.DEVICE
+        model_params['device'] = device
+        
+        logger.info(f"Loading {model_name} on {device}")
+        
+        try:
+            # Try to load the model
+            return self.get_model(model_name)
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                logger.error(f"CUDA OOM while loading {model_name}. Attempting recovery...")
+                
+                # Try emergency recovery
+                self.emergency_memory_recovery()
+                
+                # Retry with CPU
+                if device != "cpu":
+                    logger.info(f"Retrying {model_name} load on CPU")
+                    model_params['device'] = "cpu"
+                    model_params['force_cpu'] = True
+                    try:
+                        return self.get_model(model_name)
+                    except Exception as e2:
+                        logger.error(f"CPU fallback failed for {model_name}: {e2}")
+                
+                # If we got here, both attempts failed
+                raise RuntimeError(f"Could not load {model_name} due to memory constraints: {e}")
+            else:
+                # Re-raise other errors
+                raise

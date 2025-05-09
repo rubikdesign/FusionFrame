@@ -82,6 +82,38 @@ class BasePipeline(ABC):
 
     # --- Metode Noi pentru Prompt Enhancement ---
 
+
+
+    # În BasePipeline, adaugă aceste metode:
+
+    def _enhance_prompt(self, prompt: str, operation: Optional[Dict[str, Any]] = None, 
+                    image_context: Optional[Dict[str, Any]] = None) -> str:
+        """Îmbunătățește promptul pozitiv folosind PromptEnhancer."""
+        if not self.prompt_enhancer:
+            logger.warning("PromptEnhancer not initialized. Returning original prompt.")
+            return prompt
+        try:
+            op_type = operation.get("type") if operation else None
+            return self.prompt_enhancer.enhance_prompt(prompt, operation_type=op_type, image_context=image_context)
+        except Exception as e:
+            logger.error(f"Error enhancing prompt: {e}. Returning original.", exc_info=True)
+            return prompt
+
+    def _get_negative_prompt(self, prompt: str, operation: Optional[Dict[str, Any]] = None,
+                            image_context: Optional[Dict[str, Any]] = None) -> str:
+        """Generează promptul negativ folosind PromptEnhancer."""
+        fallback_negative = self.model_config.GENERATION_PARAMS.get("negative_prompt", "low quality, blurry")
+        if not self.prompt_enhancer:
+            logger.warning("PromptEnhancer not initialized. Returning default negative prompt.")
+            return fallback_negative
+        try:
+            op_type = operation.get("type") if operation else None
+            negative = self.prompt_enhancer.generate_negative_prompt(prompt=prompt, operation_type=op_type, image_context=image_context)
+            return negative if negative else fallback_negative
+        except Exception as e:
+            logger.error(f"Error generating negative prompt: {e}. Returning default.", exc_info=True)
+            return fallback_negative
+
     def _enhance_prompt(self,
                         prompt: str,
                         operation: Optional[Dict[str, Any]] = None,

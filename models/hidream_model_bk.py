@@ -3,7 +3,7 @@
 
 """
 Implementation for HiDream model in FusionFrame 2.0 (Optimized Version)
-- Versiune îmbunătățită cu optimizări de memorie și CPU offloading pentru text encoders
+- Cu offloading dezactivat pentru a evita blocajele
 """
 
 import os
@@ -223,19 +223,13 @@ class HiDreamModel(BaseModel):
                     except (ImportError, Exception) as e_vers:
                         logger.warning(f"Couldn't determine transformers version: {e_vers}")
                     
-                    # MODIFICARE: Adăugare load_in_8bit pentru LOW_VRAM_MODE
-                    load_in_8bit = AppConfig.LOW_VRAM_MODE  # Folosește 8-bit când suntem în LOW_VRAM_MODE
-                    
-                    logger.info(f"Loading Llama model with load_in_8bit={load_in_8bit}")
-                    
                     self.text_encoder_4 = LlamaForCausalLM.from_pretrained(
                         llama_model_name,
                         output_hidden_states=True,  # Required for HiDream
                         output_attentions=True,     # Required for HiDream
-                        torch_dtype=AppConfig.DTYPE, # sau torch.bfloat16 dacă e suportat
+                        torch_dtype=AppConfig.DTYPE, # or torch.bfloat16 if supported and preferred
                         cache_dir=AppConfig.CACHE_DIR,
-                        device_map=transformers_device_map,
-                        load_in_8bit=load_in_8bit,  # Adăugat pentru economisire memorie
+                        device_map=transformers_device_map
                     )
                     
                     logger.info("Llama text encoder and tokenizer for HiDream-I1 loaded successfully.")
@@ -284,23 +278,6 @@ class HiDreamModel(BaseModel):
                         logger.info(f"Pipeline moved to {self.device} successfully.")
                     except Exception as e_device:
                         logger.error(f"Could not move pipeline to device: {e_device}")
-                    
-                    # MODIFICARE: Mută text encoders pe CPU pentru a economisi VRAM
-                    logger.info("Moving text encoders to CPU to save VRAM")
-                    
-                    if hasattr(self.pipeline, "text_encoder") and self.pipeline.text_encoder is not None:
-                        try:
-                            self.pipeline.text_encoder.to("cpu")
-                            logger.info("Moved text_encoder to CPU")
-                        except Exception as e_te:
-                            logger.warning(f"Could not move text_encoder to CPU: {e_te}")
-                    
-                    if hasattr(self.pipeline, "text_encoder_2") and self.pipeline.text_encoder_2 is not None:
-                        try:
-                            self.pipeline.text_encoder_2.to("cpu")
-                            logger.info("Moved text_encoder_2 to CPU")
-                        except Exception as e_te2:
-                            logger.warning(f"Could not move text_encoder_2 to CPU: {e_te2}")
                     
                     # Enable VAE slicing to save memory
                     try:
@@ -455,43 +432,6 @@ class HiDreamModel(BaseModel):
         logger.info(f"HiDream model '{self.model_id}' unloaded successfully.")
         return True
 
-    # METODĂ NOUĂ: Emergency cleanup pentru situații de OOM
-    def emergency_cleanup(self) -> None:
-        """
-        Eliberare agresivă a memoriei în caz de urgență OOM (Out of Memory)
-        """
-        logger.warning(f"Performing emergency memory cleanup for HiDream model '{self.model_id}'")
-        
-        # Mută toate componentele posibile pe CPU
-        if self.pipeline:
-            # Mută text encoders pe CPU
-            if hasattr(self.pipeline, "text_encoder") and self.pipeline.text_encoder is not None:
-                try:
-                    self.pipeline.text_encoder.to("cpu")
-                    logger.info("Emergency: Moved text_encoder to CPU")
-                except Exception as e_te:
-                    logger.warning(f"Could not move text_encoder to CPU: {e_te}")
-                
-            if hasattr(self.pipeline, "text_encoder_2") and self.pipeline.text_encoder_2 is not None:
-                try:
-                    self.pipeline.text_encoder_2.to("cpu")
-                    logger.info("Emergency: Moved text_encoder_2 to CPU")
-                except Exception as e_te2:
-                    logger.warning(f"Could not move text_encoder_2 to CPU: {e_te2}")
-        
-        # Eliberează memoria cache
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            gc.collect()
-            
-        logger.info("Emergency cleanup completed")
-        
-        # Înregistrează starea memoriei după curățare
-        if torch.cuda.is_available():
-            allocated_gb = torch.cuda.memory_allocated(self.device) / (1024**3)
-            reserved_gb = torch.cuda.memory_reserved(self.device) / (1024**3)
-            logger.info(f"CUDA memory after emergency cleanup: {allocated_gb:.2f} GB allocated, {reserved_gb:.2f} GB reserved")
-
     def process(
         self,
         image: Union[Image.Image, np.ndarray],
@@ -520,40 +460,14 @@ class HiDreamModel(BaseModel):
         image_pil = Image.fromarray(image) if isinstance(image, np.ndarray) else image.convert("RGB")
         mask_pil = Image.fromarray(mask_image) if isinstance(mask_image, np.ndarray) else mask_image.convert("L")
 
-        # MODIFICARE: Redimensionare imagini pentru LOW_VRAM_MODE
-        if AppConfig.LOW_VRAM_MODE:
-            # Verifică dacă imaginea este prea mare pentru memorie
-            max_dim = 1024  # Dimensiunea maximă permisă în LOW_VRAM_MODE
-            img_w, img_h = image_pil.size
-            
-            if max(img_w, img_h) > max_dim:
-                # Calculăm dimensiunea nouă păstrând aspect ratio
-                if img_w > img_h:
-                    new_w, new_h = max_dim, int(img_h * max_dim / img_w)
-                else:
-                    new_w, new_h = int(img_w * max_dim / img_h), max_dim
-                    
-                # Redimensionăm imaginea și masca
-                logger.warning(f"Image too large in LOW_VRAM_MODE. Resizing from {img_w}x{img_h} to {new_w}x{new_h}")
-                image_pil = image_pil.resize((new_w, new_h), Image.LANCZOS)
-                mask_pil = mask_pil.resize((new_w, new_h), Image.NEAREST)
-
         # Ensure seed is correctly configured
         gen = torch.Generator(device=self.device).manual_seed(seed)
         
-        # MODIFICARE: Ajustare număr pași în LOW_VRAM_MODE
-        if AppConfig.LOW_VRAM_MODE and hasattr(ModelConfig, "LOW_VRAM_INFERENCE_STEPS"):
-            # Folosește număr redus de pași în LOW_VRAM_MODE
-            key = self.model_id
-            effective_num_inference_steps = ModelConfig.LOW_VRAM_INFERENCE_STEPS.get(key, 30)  # Default la 30 dacă nu există
-            logger.info(f"Using reduced inference steps in LOW_VRAM_MODE: {effective_num_inference_steps}")
-        else:
-            # Folosește numărul normal de pași
-            effective_num_inference_steps = (
-                num_inference_steps
-                if num_inference_steps is not None
-                else self.config.get("inference_steps", ModelConfig.GENERATION_PARAMS["default_steps"])
-            )
+        effective_num_inference_steps = (
+            num_inference_steps
+            if num_inference_steps is not None
+            else self.config.get("inference_steps", ModelConfig.GENERATION_PARAMS["default_steps"])
+        )
         
         effective_negative_prompt = negative_prompt if negative_prompt is not None else ModelConfig.GENERATION_PARAMS.get("negative_prompt", "")
 
@@ -589,12 +503,6 @@ class HiDreamModel(BaseModel):
         kwargs.pop('use_spatial_norm', None)
         pipeline_args.update(kwargs)
 
-        # MODIFICARE: Log starea memoriei înainte de inferență
-        if torch.cuda.is_available():
-            allocated_before = torch.cuda.memory_allocated(self.device) / (1024**3)
-            reserved_before = torch.cuda.memory_reserved(self.device) / (1024**3)
-            logger.info(f"CUDA memory before inference: {allocated_before:.2f} GB allocated, {reserved_before:.2f} GB reserved")
-
         try:
             logger.info(f"Processing with main pipeline. Steps: {effective_num_inference_steps}, Guidance: {guidance_scale}, Strength: {strength}")
             
@@ -623,61 +531,9 @@ class HiDreamModel(BaseModel):
             # Măsurăm timpul total de procesare
             proc_time = time.time() - start_time
             logger.info(f"Processing completed successfully in {proc_time:.2f} seconds")
-            
-            # MODIFICARE: Log starea memoriei după inferență
-            if torch.cuda.is_available():
-                allocated_after = torch.cuda.memory_allocated(self.device) / (1024**3)
-                reserved_after = torch.cuda.memory_reserved(self.device) / (1024**3)
-                logger.info(f"CUDA memory after inference: {allocated_after:.2f} GB allocated, {reserved_after:.2f} GB reserved")
-                logger.info(f"Memory change during inference: {allocated_after-allocated_before:.2f} GB")
 
             return {"result": result_img, "success": True, "message": f"Processing completed successfully in {proc_time:.2f}s"}
         
-        except RuntimeError as e:
-            # MODIFICARE: Logică specifică pentru gestionarea erorilor CUDA OOM
-            error_msg = str(e)
-            if "CUDA out of memory" in error_msg:
-                logger.error(f"CUDA out of memory during inference: {error_msg}")
-                
-                # Încercăm recovery cu emergency cleanup
-                logger.warning("Attempting emergency cleanup and retry with reduced parameters")
-                self.emergency_cleanup()
-                
-                # Reducem parametrii pentru o nouă încercare
-                reduced_steps = max(20, effective_num_inference_steps // 2)
-                reduced_guidance = min(7.0, guidance_scale)
-                
-                try:
-                    # Pregătim argumentele pentru reîncercare
-                    retry_args = pipeline_args.copy()
-                    retry_args["num_inference_steps"] = reduced_steps
-                    retry_args["guidance_scale"] = reduced_guidance
-                    
-                    logger.info(f"Retrying with reduced parameters: steps={reduced_steps}, guidance={reduced_guidance}")
-                    
-                    # Reîncercăm procesarea
-                    out = self.pipeline(**retry_args)
-                    result_img = out.images[0]
-                    
-                    proc_time = time.time() - start_time
-                    logger.info(f"Processing completed with reduced parameters in {proc_time:.2f} seconds")
-                    
-                    return {
-                        "result": result_img, 
-                        "success": True, 
-                        "message": f"Processing completed with reduced parameters (steps={reduced_steps}) in {proc_time:.2f}s"
-                    }
-                except Exception as retry_e:
-                    logger.error(f"Retry failed: {retry_e}")
-                    return {
-                        "result": image_pil, 
-                        "success": False, 
-                        "message": f"CUDA out of memory. Emergency retry also failed: {retry_e}"
-                    }
-            else:
-                # Alte tipuri de erori
-                logger.error(f"Processing error: {e}", exc_info=True)
-                return {"result": image_pil, "success": False, "message": str(e)}
         except Exception as e:
             logger.error(f"Processing error: {e}", exc_info=True)
             return {"result": image_pil, "success": False, "message": str(e)}

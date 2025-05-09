@@ -3,6 +3,7 @@
 
 """
 Configurations for AI models used in FusionFrame 2.0
+Enhanced with lightweight model alternatives and memory optimizations
 """
 
 class ModelConfig:
@@ -11,6 +12,24 @@ class ModelConfig:
     # --- Main and Backup Models ---
     MAIN_MODEL = "HiDream-I1-Full"
     BACKUP_MODEL_NAME = "HiDream-I1-Fast"
+
+    # --- Lightweight Model Alternatives ---
+    # Use these models when in LOW_VRAM_MODE
+    LIGHTWEIGHT_MODELS = {
+        "yolo": "yolov8n-seg.pt",  # Nano variant is much smaller than standard
+        "image_classifier": "google/vit-base-patch16-224-in21k",  # Smaller than default
+        "depth_estimator": "Intel/dpt-large",  # Smaller than full model
+        "sam": "vit_b",  # Use SAM base model instead of huge
+        "rembg": "u2netp"  # Use smaller rembg model
+    }
+
+    # --- Memory Optimization Settings ---
+    # Inference step reduction for low memory environments
+    LOW_VRAM_INFERENCE_STEPS = {
+        "HiDream-I1-Full": 30,   # Reduced from 50
+        "HiDream-I1-Fast": 12,   # Reduced from 16
+        "refiner": 15           # Reduced from 25
+    }
 
     # --- Detailed Configurations for Specific Models ---
 
@@ -45,7 +64,7 @@ class ModelConfig:
 
     # Segment Anything Model (SAM)
     SAM_CONFIG = {
-        "model_type": "vit_h",
+        "model_type": "vit_h",  # Standard: "vit_h", Lightweight: "vit_b"
         "checkpoint": "sam_vit_h_4b8939.pth",
         "points_per_side": 32,
         "pred_iou_thresh": 0.95,
@@ -61,37 +80,45 @@ class ModelConfig:
 
     # CLIPSeg
     CLIP_CONFIG = {
-        "model_id": "CIDAS/clipseg-rd64-refined"
+        "model_id": "CIDAS/clipseg-rd64-refined",  # Smaller: "CIDAS/clipseg-rd16"
+        "cpu_offload": True,  # Offload to CPU when not in use
+        "quantize": True  # Use quantization to reduce memory footprint
     }
 
     # Image Classifier (ViT)
     IMAGE_CLASSIFIER_CONFIG = {
-        "model_id": "google/vit-base-patch16-224",
-        "top_n_results": 5
+        "model_id": "google/vit-base-patch16-224",  # Standard model
+        "lightweight_model_id": "google/vit-base-patch16-224-in21k",  # Smaller alternative
+        "top_n_results": 5,
+        "cpu_offload": True  # Can run on CPU with minimal performance impact
     }
 
     # Depth Estimator (DPT/MiDaS)
     DEPTH_ESTIMATOR_CONFIG = {
-        "model_id": "Intel/dpt-hybrid-midas"
+        "model_id": "Intel/dpt-hybrid-midas",  # Standard model
+        "lightweight_model_id": "Intel/dpt-large",  # Smaller alternative
+        "cpu_offload": True  # Better on CPU than losing other models
     }
 
     # Object Detector (YOLO) - Specific analysis parameters
     OBJECT_DETECTOR_CONFIG = {
-        # Assuming ModelManager loads YOLO under the key 'yolo'
-        # 'model_name' can be added here if we manage multiple YOLO models.
-        "confidence_threshold": 0.4, # Threshold for object analysis
-        "iou_threshold": 0.5          # IoU threshold for NMS in YOLO predict
+        # Standard model is usually "yolov8x-seg.pt"
+        "model_id": "yolov8x-seg.pt",
+        "lightweight_model_id": "yolov8n-seg.pt",  # Nano variant - much smaller
+        "confidence_threshold": 0.4,  # Threshold for object analysis
+        "iou_threshold": 0.5,         # IoU threshold for NMS in YOLO predict
+        "img_size": 640,              # Standard size for prediction
+        "lightweight_img_size": 320    # Smaller size for low VRAM mode
     }
 
     # MediaPipe (Selfie Seg & Face Detection)
-    # Remove/Comment from AppConfig if defined here
     MEDIAPIPE_SELFIE_MODEL_SELECTION = 1
     MEDIAPIPE_FACE_MODEL_SELECTION = 0
     MEDIAPIPE_FACE_MIN_CONFIDENCE = 0.5
 
     # Rembg
-    # Remove/Comment from AppConfig if defined here
-    REMBG_MODEL_NAME = "u2net"
+    REMBG_MODEL_NAME = "u2net"  # Standard model
+    REMBG_LIGHTWEIGHT_MODEL_NAME = "u2netp"  # Smaller model
 
     # --- Other Global Configurations ---
 
@@ -113,4 +140,39 @@ class ModelConfig:
             "bad proportions, extra limbs, cloned face, gross proportions, malformed limbs, missing arms, missing legs, "
             "extra arms, extra legs, fused fingers, too many fingers, long neck, username, artist name"
         )
+    }
+    
+    # --- Memory-specific Operation Parameters ---
+    # Default parameter adjustments for low VRAM mode
+    LOW_VRAM_PARAMS = {
+        "remove": {
+            "strength": 0.85,
+            "num_inference_steps": 40,  # Reduced from 60
+            "guidance_scale": 7.0
+        },
+        "replace": {
+            "strength": 0.90,
+            "num_inference_steps": 45,  # Reduced from 70
+            "guidance_scale": 7.0
+        },
+        "color": {
+            "strength": 0.65,
+            "num_inference_steps": 30,  # Reduced from 45
+            "guidance_scale": 7.0
+        },
+        "background": {
+            "strength": 0.80,
+            "num_inference_steps": 40,  # Reduced from 65
+            "guidance_scale": 7.0
+        },
+        "add": {
+            "strength": 0.75,
+            "num_inference_steps": 35,  # Reduced from original
+            "guidance_scale": 7.0
+        },
+        "general": {
+            "strength": 0.75,
+            "num_inference_steps": 30,  # General reduction
+            "guidance_scale": 7.0
+        }
     }

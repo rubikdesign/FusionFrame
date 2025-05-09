@@ -171,7 +171,7 @@ pip install -U transformers
 # Verificarea versiunilor instalate pentru pachetele cheie
 log "Verificarea versiunilor instalate pentru pachetele cheie..."
 pip list | grep -E "torch|vision|audio|diffusers|transformers|accelerate|xformers|flash-attn|bitsandbytes|ultralytics" | tee -a "$LOG_FILE"
-
+pip install --upgrade accelerate bitsandbytes
 # Creează script de execuție
 log "Creez script de execuție 'run_fusionframe.sh'..."
 cat > run_fusionframe.sh << 'EOL'
@@ -233,7 +233,7 @@ fi
 echo "Pornesc aplicația FusionFrame..."
 # Punctul de intrare al aplicației Gradio
 
-python interface/ui.py "$@"
+python app.py --share "$@"
 
 EOL
 

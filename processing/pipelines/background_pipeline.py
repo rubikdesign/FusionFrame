@@ -3,7 +3,7 @@
 
 """
 Pipeline pentru înlocuirea fundalurilor în FusionFrame 2.0
-(Actualizat pentru a folosi PromptEnhancer din BasePipeline)
+(Actualizat cu integrare completă PostProcessor și PromptEnhancer)
 """
 
 import logging
@@ -11,10 +11,12 @@ import cv2
 import numpy as np
 from typing import Dict, Any, Optional, Union, Tuple, Callable
 from PIL import Image
-import time # Adăugat
+import time
 
 from processing.pipelines.base_pipeline import BasePipeline
 from processing.analyzer import OperationAnalyzer
+from processing.post_processor import PostProcessor
+from processing.prompt_enhancer import PromptEnhancer
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,9 @@ class BackgroundPipeline(BasePipeline):
     def __init__(self):
         super().__init__()
         self.operation_analyzer = OperationAnalyzer()
+        # Inițializăm direct PostProcessor și PromptEnhancer
+        self.post_processor = PostProcessor()
+        self.prompt_enhancer = PromptEnhancer()
 
     def process(self,
                image: Union[Image.Image, np.ndarray],
@@ -36,13 +41,18 @@ class BackgroundPipeline(BasePipeline):
                use_controlnet_if_available: bool = False, # ControlNet mai puțin util pt schimbare completă bg
                use_refiner_if_available: Optional[bool] = None,
                refiner_strength: Optional[float] = None,
+               enhance_details: bool = False,  # Parametri expliciti pentru post-procesare
+               fix_faces: bool = False,
+               remove_artifacts: bool = False,
                **kwargs) -> Dict[str, Any]:
 
         self.progress_callback = progress_callback
         start_time = time.time()
 
         # 1. Analiză operație și input
-        if operation is None: operation = self.operation_analyzer.analyze_operation(prompt)
+        if operation is None: 
+            operation = self.operation_analyzer.analyze_operation(prompt)
+        
         op_type = operation.get('type', 'background')
         background_desc = operation.get('attribute') or prompt # Folosim atributul sau promptul ca descriere
 
@@ -50,21 +60,26 @@ class BackgroundPipeline(BasePipeline):
             pil_image = self._convert_to_pil(image)
             image_np = self._convert_to_cv2(pil_image)
         except (TypeError, ValueError) as e:
-             msg = f"Input image conversion error: {e}"; logger.error(msg)
+             msg = f"Input image conversion error: {e}"
+             logger.error(msg)
              return {'result_image': None, 'mask_image': None, 'operation': operation, 'message': msg, 'success': False}
 
         # 2. Analiză imagine
         if image_context is None:
             self._update_progress(0.1, desc="Analiză imagine...")
             image_context = self.image_analyzer.analyze_image_context(pil_image)
-            if "error" in image_context: image_context = {}
+            if "error" in image_context:
+                 logger.error(f"Image analysis failed: {image_context['error']}")
+                 image_context = {}
         else:
             self._update_progress(0.1, desc="Context imagine primit.")
 
         # 3. Generare mască FUNDAL
         self._update_progress(0.2, desc="Generare mască fundal...")
         mask_result = self.mask_generator.generate_mask(
-            image=image_np, prompt="background", operation={'type': 'background'},
+            image=image_np, 
+            prompt="background", 
+            operation={'type': 'background'},
             progress_callback=lambda p, desc=None: self._update_progress(0.2 + p * 0.4, desc=desc)
         )
 
@@ -73,63 +88,115 @@ class BackgroundPipeline(BasePipeline):
             subject_mask_np = self._get_subject_mask_fallback(image_np)
             if subject_mask_np is None:
                  msg = "Background mask generation failed (including fallback)."
-                 logger.error(msg); return {'result_image': pil_image, 'mask_image': None, 'operation': operation, 'message': msg, 'success': False}
+                 logger.error(msg)
+                 return {'result_image': pil_image, 'mask_image': None, 'operation': operation, 'message': msg, 'success': False}
             background_mask_np = cv2.bitwise_not(subject_mask_np)
         else:
             background_mask_np = mask_result.get('mask')
 
         mask_pil = self._ensure_pil_mask(background_mask_np)
         if mask_pil is None:
-             msg = "Background mask is None or invalid."; logger.error(msg)
+             msg = "Background mask is None or invalid."
+             logger.error(msg)
              return {'result_image': pil_image, 'mask_image': None, 'operation': operation, 'message': msg, 'success': False}
 
         # 4. Îmbunătățire Prompt și Parametri
         self._update_progress(0.6, desc="Pregătire prompt fundal...")
-        # Folosim enhancer-ul doar cu descrierea fundalului + contextul general
-        enhanced_prompt = self._enhance_prompt(background_desc, operation=operation, image_context=image_context)
-        enhanced_prompt += ", background scene, environmental context" # Adăugăm specificitate
-        negative_prompt = self._get_negative_prompt(background_desc, operation=operation, image_context=image_context)
-        negative_prompt += ", person, people, subject, foreground object, blurry foreground, watermark, text, signature" # Negativ specific
+        
+        # Folosim direct PromptEnhancer cu descrierea fundalului + contextul general
+        enhanced_prompt = self.prompt_enhancer.enhance_prompt(
+            prompt=background_desc, 
+            operation_type=op_type, 
+            image_context=image_context
+        )
+        enhanced_prompt += ", background scene, environmental context"  # Adăugăm specificitate
+
+        negative_prompt = self.prompt_enhancer.generate_negative_prompt(
+            prompt=background_desc, 
+            operation_type=op_type, 
+            image_context=image_context
+        )
+        negative_prompt += ", person, people, subject, foreground object, blurry foreground, watermark, text, signature"  # Negativ specific
 
         gen_params = self._get_generation_params(op_type)
         final_params = {
-            'image': pil_image, 'mask_image': mask_pil, 'prompt': enhanced_prompt, 'negative_prompt': negative_prompt,
-            'strength': max(0.85, strength), # Strength mare
+            'image': pil_image, 
+            'mask_image': mask_pil, 
+            'prompt': enhanced_prompt, 
+            'negative_prompt': negative_prompt,
+            'strength': max(0.85, strength),  # Strength mare
             'num_inference_steps': num_inference_steps if num_inference_steps is not None else gen_params['num_inference_steps'],
             'guidance_scale': guidance_scale if guidance_scale is not None else gen_params['guidance_scale'],
-            'controlnet_conditioning_scale': None, # Dezactivat explicit
-            'use_refiner': use_refiner_if_available, 'refiner_strength': refiner_strength
+            'controlnet_conditioning_scale': None,  # Dezactivat explicit
+            'use_refiner': use_refiner_if_available, 
+            'refiner_strength': refiner_strength
         }
         final_params = {k: v for k, v in final_params.items() if v is not None}
 
-        # 5. Apel model principal
+        # 5. Apel model principal cu tratare OOM
         self._update_progress(0.7, desc="Generare fundal...")
         main_model = self.model_manager.get_model('main')
         if not main_model or not getattr(main_model, 'is_loaded', False):
-            msg = "Main model not available."; logger.error(msg)
+            msg = "Main model not available."
+            logger.error(msg)
             return {'result_image': pil_image, 'mask_image': mask_pil, 'operation': operation, 'message': msg, 'success': False}
 
         try:
-            output_dict = main_model.process(**final_params)
+            # Folosim metoda _safe_model_process pentru tratarea OOM
+            output_dict = self._safe_model_process(main_model, final_params)
 
             if output_dict.get('success'):
-                 result_pil = self._convert_to_pil(output_dict.get('result'))
-                 # TODO: Post-procesare blending margini
-                 self._update_progress(1.0, desc="Procesare completă!")
-                 total_time = time.time() - start_time
-                 return {
-                     'result_image': result_pil, 'mask_image': mask_pil, 'operation': operation,
-                     'message': output_dict.get('message', f"Background replaced ({total_time:.2f}s)."),
-                     'success': True
-                 }
+                # Obținem imaginea rezultat
+                result_img = output_dict.get('result')
+                
+                # 6. Aplicăm Post-Procesarea dacă este cerută
+                if enhance_details or fix_faces or remove_artifacts:
+                    self._update_progress(0.85, desc="Aplicare post-procesare...")
+                    try:
+                        post_result = self.post_processor.process(
+                            image=result_img,
+                            original_image=pil_image,
+                            mask=mask_pil,
+                            operation_type=op_type,
+                            enhance_details=enhance_details,
+                            fix_faces=fix_faces,
+                            remove_artifacts=remove_artifacts,
+                            seamless_blending=True,
+                            color_harmonization=True,
+                            progress_callback=lambda p, desc=None: self._update_progress(0.85 + p * 0.15, desc=desc)
+                        )
+                        
+                        if post_result.get('success'):
+                            result_pil = post_result.get('result_image')
+                            logger.info(f"Post-procesare aplicată cu succes: {post_result.get('message')}")
+                        else:
+                            result_pil = self._convert_to_pil(result_img)
+                            logger.warning(f"Post-procesarea a eșuat: {post_result.get('message')}")
+                    except Exception as e_post:
+                        result_pil = self._convert_to_pil(result_img)
+                        logger.error(f"Eroare în timpul post-procesării: {e_post}", exc_info=True)
+                else:
+                    result_pil = self._convert_to_pil(result_img)
+                
+                # Finalizare și returnare
+                self._update_progress(1.0, desc="Procesare completă!")
+                total_time = time.time() - start_time
+                return {
+                    'result_image': result_pil, 
+                    'mask_image': mask_pil, 
+                    'operation': operation,
+                    'message': output_dict.get('message', f"Background replaced ({total_time:.2f}s)."),
+                    'success': True
+                }
             else:
-                 msg = f"Background replacement failed: {output_dict.get('message')}"; logger.error(msg)
+                 msg = f"Background replacement failed: {output_dict.get('message')}"
+                 logger.error(msg)
                  return {'result_image': pil_image, 'mask_image': mask_pil, 'operation': operation, 'message': msg, 'success': False}
         except Exception as e:
-            msg = f"Runtime error during background pipeline: {e}"; logger.error(msg, exc_info=True)
+            msg = f"Runtime error during background pipeline: {e}"
+            logger.error(msg, exc_info=True)
             return {'result_image': pil_image, 'mask_image': mask_pil, 'operation': operation, 'message': msg, 'success': False}
-
-
+    
     # --- Metodă Fallback pentru Masca Subiectului ---
     def _get_subject_mask_fallback(self, image_np: np.ndarray) -> Optional[np.ndarray]:
         """Încearcă să obțină masca subiectului prin rembg sau mediapipe ca fallback."""
@@ -137,12 +204,13 @@ class BackgroundPipeline(BasePipeline):
         try: # Rembg
             rembg_session = self.model_manager.get_model('rembg')
             if rembg_session:
-                # Rembg .predict direct pe NumPy BGR returnează masca alpha ca ultim canal? Verificăm.
-                # Sau folosim .remove și extragem alpha? Mai sigur .remove
-                out_rgba = rembg_session.remove(image_np) # Presupunem că returnează RGBA
+                # Rembg .remove returnează RGBA, putem extrage canalul alpha ca mască
+                out_rgba = rembg_session.remove(image_np)
                 if out_rgba.shape[2] == 4:
-                     subject_mask = out_rgba[:,:,3]; logger.info("Using Rembg fallback for subject mask.")
-        except Exception as e_rembg: logger.warning(f"Rembg fallback failed: {e_rembg}")
+                     subject_mask = out_rgba[:,:,3]
+                     logger.info("Using Rembg fallback for subject mask.")
+        except Exception as e_rembg:
+            logger.warning(f"Rembg fallback failed: {e_rembg}")
 
         if subject_mask is None: # MediaPipe
             try:
@@ -153,14 +221,45 @@ class BackgroundPipeline(BasePipeline):
                         mask_float = results.segmentation_mask
                         subject_mask = (mask_float > 0.5).astype(np.uint8) * 255
                         logger.info("Using MediaPipe fallback for subject mask.")
-            except Exception as e_mp: logger.warning(f"MediaPipe fallback failed: {e_mp}")
+            except Exception as e_mp:
+                logger.warning(f"MediaPipe fallback failed: {e_mp}")
 
-        if subject_mask is None: logger.error("All fallback mask methods failed for background."); return None
+        if subject_mask is None:
+            logger.error("All fallback mask methods failed for background.")
+            return None
 
         # Post-procesare simplă
         try:
              kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5))
              subject_mask = cv2.morphologyEx(subject_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
              subject_mask = cv2.morphologyEx(subject_mask, cv2.MORPH_OPEN, kernel, iterations=1)
-        except Exception as e_morph: logger.warning(f"Morphology on fallback mask failed: {e_morph}")
+        except Exception as e_morph:
+            logger.warning(f"Morphology on fallback mask failed: {e_morph}")
         return subject_mask
+    
+    def _safe_model_process(self, model, final_params) -> Dict[str, Any]:
+        """Procesează modelul cu tratarea erorilor OOM."""
+        try:
+            return model.process(**final_params)
+        except RuntimeError as e:
+            if "CUDA out of memory" in str(e):
+                logger.warning("CUDA out of memory. Încercare de recuperare...")
+                self.model_manager.emergency_memory_recovery()
+                
+                # Reducem parametrii pentru reîncercare
+                steps_before = final_params.get('num_inference_steps', 50)
+                guidance_before = final_params.get('guidance_scale', 7.5)
+                
+                final_params['num_inference_steps'] = max(20, steps_before // 2)
+                final_params['guidance_scale'] = min(7.0, guidance_before)
+                
+                logger.info(f"Reîncerc cu parametri reduși: steps {steps_before} -> {final_params['num_inference_steps']}, "
+                          f"guidance {guidance_before} -> {final_params['guidance_scale']}")
+                
+                try:
+                    return model.process(**final_params)
+                except Exception as retry_e:
+                    logger.error(f"Recuperarea din OOM a eșuat: {retry_e}")
+                    raise RuntimeError(f"Procesare eșuată după recuperare din OOM: {retry_e}")
+            else:
+                raise
