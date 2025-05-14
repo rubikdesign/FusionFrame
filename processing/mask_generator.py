@@ -77,6 +77,88 @@ class MaskGenerator:
         logger.debug(f"MaskGenerator initialized with {len(self.rules)} rules.")
         logger.info("Memory optimization: CLIPSeg and auxiliary models will run on CPU")
 
+
+
+    def _strategy_glasses_specialized(self, img_np_bgr: np.ndarray, prompt: str, 
+                                    operation: Dict[str, Any], image_context: Optional[Dict[str, Any]], 
+                                    rule_params: Dict[str, Any], upd: Callable) -> Optional[np.ndarray]:
+        """Strategie specializată pentru generarea măștii pentru ochelari, bazată pe repere faciale precise."""
+        logger.debug("Applying specialized glasses mask generation strategy")
+        
+        try:
+            # 1. Obține detectorul facial
+            face_detector = self.models.get_model("face_detector")
+            if not face_detector or not isinstance(face_detector, dict) or 'model' not in face_detector:
+                logger.warning("Face detector not available for glasses mask")
+                return None
+                
+            face_detect_model = face_detector['model']
+            
+            # 2. Detectează fața și punctele faciale
+            img_rgb = cv2.cvtColor(img_np_bgr, cv2.COLOR_BGR2RGB)
+            
+            # MediaPipe face detection
+            results = face_detect_model.process(img_rgb)
+            
+            # Verifică dacă s-a detectat vreo față
+            if not results.detections or len(results.detections) == 0:
+                logger.warning("No faces detected for glasses mask")
+                return None
+                
+            # Folosește prima față detectată
+            detection = results.detections[0]
+            
+            # Obține dimensiunile imaginii
+            h, w = img_np_bgr.shape[:2]
+            
+            # 3. Extrage repere faciale relevante pentru ochi
+            from mediapipe.framework.formats import landmark_pb2
+            import math
+            
+            # Coordonate normalizate pentru zona ochilor (MediaPipe face detection)
+            right_eye = detection.location_data.relative_keypoints[0]
+            left_eye = detection.location_data.relative_keypoints[1]
+            
+            # Convertește la coordonate pixel
+            right_eye_px = (int(right_eye.x * w), int(right_eye.y * h))
+            left_eye_px = (int(left_eye.x * w), int(left_eye.y * h))
+            
+            # Calculează distanța între ochi pentru a determina lățimea ochelarilor
+            eye_distance = math.sqrt((right_eye_px[0] - left_eye_px[0])**2 + (right_eye_px[1] - left_eye_px[1])**2)
+            
+            # Centrul ochilor
+            eyes_center = ((right_eye_px[0] + left_eye_px[0]) // 2, (right_eye_px[1] + left_eye_px[1]) // 2)
+            
+            # 4. Generează o mască pentru ochelari bazată pe reperele faciale
+            glasses_mask = np.zeros((h, w), dtype=np.uint8)
+            
+            # Calculează dimensiunile ochelarilor
+            glasses_width = int(eye_distance * 1.7)  # Puțin mai lat decât distanța între ochi
+            glasses_height = int(eye_distance * 0.5)  # Înălțimea proporțională cu distanța
+            
+            # Coordonatele dreptunghiului ochelarilor
+            glasses_x1 = max(0, eyes_center[0] - glasses_width // 2)
+            glasses_y1 = max(0, eyes_center[1] - glasses_height // 2)
+            glasses_x2 = min(w, eyes_center[0] + glasses_width // 2)
+            glasses_y2 = min(h, eyes_center[1] + glasses_height // 2)
+            
+            # Creează o mască eliptică în loc de dreptunghi pentru un aspect mai natural
+            cv2.ellipse(glasses_mask, eyes_center, (glasses_width // 2, glasses_height), 0, 0, 360, 255, -1)
+            
+            # 5. Neteziește marginile măștii
+            glasses_mask = cv2.GaussianBlur(glasses_mask, (15, 15), 0)
+            
+            # 6. Binarizează masca pentru rezultatul final
+            _, glasses_mask_binary = cv2.threshold(glasses_mask, 100, 255, cv2.THRESH_BINARY)
+            
+            logger.info("Generated specialized glasses mask based on facial landmarks")
+            return glasses_mask_binary
+            
+        except Exception as e:
+            logger.error(f"Error generating glasses mask: {e}", exc_info=True)
+            return None
+
+
     def _define_rules(self) -> List[Dict[str, Any]]:
         """Definește regulile de prioritate, acum cu condiții bazate și pe context și strategii SAM."""
 
@@ -100,6 +182,15 @@ class MaskGenerator:
                 "params": {"yolo_labels": ["person"]}, # Label căutat în detecțiile YOLO
                 "message": "SAM mask guided by YOLO detection for Person"
             },
+
+            {
+                "name": "Glasses (Facial Landmarks)",
+                "condition": lambda p, op, ctx: has_target(op, ["glasses", "sunglasses"]) or prompt_contains(p, ["glasses", "sunglasses", "eyewear"]),
+                "strategy": self._strategy_glasses_specialized,
+                "params": {},
+                "message": "Glasses mask (Facial landmarks)"
+            },
+
             {
                 "name": "SAM + YOLO: Car",
                 "condition": lambda p, op, ctx: (is_op_type(op, ["remove", "color", "replace", "add"]) and \

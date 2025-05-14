@@ -119,9 +119,39 @@ fi
 log "Verificare PyTorch cu CUDA..."
 python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA disponibil: {torch.cuda.is_available()}, Versiune CUDA: {torch.version.cuda if torch.cuda.is_available() else \"N/A\"}');" | tee -a "$LOG_FILE"
 
+
+
+# ESRGAN
+mkdir -p models/esrgan
+wget https://github.com/xinntao/ESRGAN/releases/download/v0.1.0/RRDB_ESRGAN_x4.pth -O models/esrgan/RRDB_ESRGAN_x4.pth
+
+# GPEN
+mkdir -p models/gpen
+wget https://public-vigen-video.oss-cn-shanghai.aliyuncs.com/robin/models/GPEN-BFR-512.pth -O models/gpen/GPEN-BFR-512.pth
+wget http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2 -O models/gpen/shape_predictor_68_face_landmarks.dat.bz2
+bunzip2 models/gpen/shape_predictor_68_face_landmarks.dat.bz2
+
+# CodeFormer
+mkdir -p models/codeformer
+wget https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth -O models/codeformer/codeformer.pth
+
+
+mkdir -p models/juggernaut
+
+# Descarcă modelul safetensors direct dacă nu există
+if [ ! -f "/workspace/FusionFrame/models/juggernaut/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors" ]; then
+    echo "Descărcare model Juggernaut-XL_v9..."
+    wget -O /models/juggernaut/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors "https://huggingface.co/RunDiffusion/Juggernaut-XL-v9/resolve/main/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors?download=true"
+    echo "Descărcare completă."
+else
+    echo "Modelul Juggernaut-XL_v9 există deja."
+fi
+
+
 # Instalează dependențele din requirements.txt
 log "Instalez dependențele de bază din requirements.txt..."
 pip install -r requirements.txt
+
 
 # Instalăm diffusers direct din GitHub - CRUCIAL pentru HiDream
 log "Instalez diffusers direct din GitHub (necesar pentru HiDream)..."

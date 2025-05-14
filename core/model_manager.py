@@ -13,6 +13,8 @@ import logging
 import requests # Asigură-te că e instalat
 import zipfile # Asigură-te că e instalat
 import time
+import cv2
+import numpy as np
 from tqdm.auto import tqdm # Asigură-te că e instalat
 from pathlib import Path
 from typing import Optional, Dict, Any, Union, List
@@ -1221,6 +1223,355 @@ class ModelManager:
                 raise # Re-aruncă excepția
 
         return wrapper
+    
+    # Adăugare funcționalitate pentru modelele specializate pentru post-procesare
+    def get_specialized_model(self, model_name: str) -> Any:
+        """
+        Obține un model specializat pentru post-procesare (ESRGAN, GPEN, CodeFormer etc.)
+        
+        Args:
+            model_name: Numele modelului specializat ('esrgan', 'gpen', 'codeformer')
+            
+        Returns:
+            Instanța modelului sau None dacă nu este disponibil
+        """
+        logger.debug(f"Request specialized model: '{model_name}'")
+        
+        # Mapare pentru modelele specializate
+        specialized_models = {
+            'esrgan': self._load_esrgan_model,
+            'gpen': self._load_gpen_model,
+            'codeformer': self._load_codeformer_model
+        }
+        
+        if model_name not in specialized_models:
+            logger.warning(f"Specialized model '{model_name}' not supported.")
+            return None
+        
+        # Încercăm să încărcăm modelul specializat
+        loader_func = specialized_models[model_name]
+        try:
+            return loader_func()
+        except Exception as e:
+            logger.error(f"Error loading specialized model '{model_name}': {e}", exc_info=True)
+            return None
+        
 
-    # load_model_with_memory_management nu mai este necesară dacă get_model și politicile sunt robuste.
-    # Am integrat logica similară în get_model și _apply_model_loading_policy / _free_memory_proactively.
+
+    def _load_esrgan_model(self) -> Optional[Any]:
+        """Încarcă modelul ESRGAN real pentru îmbunătățirea detaliilor."""
+        logger.info("Loading real ESRGAN model...")
+        try:
+            import torch
+            
+            # Calea către model - ar trebui definită în config
+            model_path = getattr(self.config, "ESRGAN_MODEL_PATH", 
+                            os.path.join(self.config.MODEL_DIR, "esrgan", "RRDB_ESRGAN_x4.pth"))
+            
+            # Verifică dacă există fișierul modelului
+            if not os.path.exists(model_path):
+                # Încearcă să descarci modelul dacă nu există
+                os.makedirs(os.path.dirname(model_path), exist_ok=True)
+                download_url = "https://github.com/xinntao/ESRGAN/releases/download/v0.1.0/RRDB_ESRGAN_x4.pth"
+                self.download_file(download_url, model_path)
+                if not os.path.exists(model_path):
+                    logger.error(f"Could not download ESRGAN model to {model_path}")
+                    return None
+            
+            # Importă modelul RRDBNet
+            from models.rrdb_arch import RRDBNet
+            
+            # Setează device-ul
+            device = torch.device('cuda' if torch.cuda.is_available() and not getattr(self.config, "FORCE_CPU_FOR_ENHANCEMENT", False) else 'cpu')
+            
+            # Definește arhitectura modelului
+            model = RRDBNet(3, 3, 64, 23, gc=32)
+            
+            # Încarcă starea modelului
+            state_dict = torch.load(model_path, map_location=device)
+            model.load_state_dict(state_dict)
+            model.eval()
+            model = model.to(device)
+            
+            # Creează un wrapper pentru interfațarea cu post-procesorul
+            class ESRGANReal:
+                def __init__(self, model, device):
+                    self.model = model
+                    self.device = device
+                    logger.info(f"ESRGAN initialized on {device}")
+                    
+                def process(self, image_np):
+                    try:
+                        logger.info(f"Processing image with ESRGAN on {self.device}")
+                        
+                        # Convertește imaginea pentru PyTorch
+                        img = image_np.astype(np.float32) / 255.
+                        img = img[:, :, [2, 1, 0]]  # BGR la RGB
+                        img = torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(self.device)
+                        
+                        # Inferența
+                        with torch.no_grad():
+                            output = self.model(img)
+                        
+                        # Convertește înapoi la NumPy
+                        output = output.squeeze().permute(1, 2, 0).cpu().numpy()
+                        output = output[[2, 1, 0], :, :]  # RGB la BGR
+                        output = np.clip(output * 255.0, 0, 255).astype(np.uint8)
+                        
+                        # Redimensionează la dimensiunea originală dacă e necesar
+                        if output.shape[:2] != image_np.shape[:2]:
+                            output = cv2.resize(output, (image_np.shape[1], image_np.shape[0]), 
+                                            interpolation=cv2.INTER_LANCZOS4)
+                        
+                        return {'success': True, 'result': output}
+                    except Exception as e:
+                        logger.error(f"ESRGAN processing error: {e}", exc_info=True)
+                        return {'success': False, 'message': str(e)}
+            
+            return ESRGANReal(model, device)
+        except ImportError as e:
+            logger.error(f"Required libraries for ESRGAN not available: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to load ESRGAN model: {e}", exc_info=True)
+            return None
+            
+
+
+    def _load_gpen_model(self) -> Optional[Any]:
+        """Încarcă modelul GPEN real pentru restaurarea fețelor."""
+        logger.info("Loading real GPEN model...")
+        try:
+            import torch
+            from torch import nn
+            import dlib
+            
+            # Calea către modelele necesare
+            models_dir = os.path.join(self.config.MODEL_DIR, "gpen")
+            os.makedirs(models_dir, exist_ok=True)
+            
+            # Descarcă modelul GPEN dacă nu există
+            gpen_model_path = os.path.join(models_dir, "GPEN-BFR-512.pth")
+            if not os.path.exists(gpen_model_path):
+                download_url = "https://public-vigen-video.oss-cn-shanghai.aliyuncs.com/robin/models/GPEN-BFR-512.pth"
+                self.download_file(download_url, gpen_model_path)
+            
+            # Descarcă detector facial dlib dacă nu există
+            dlib_model_path = os.path.join(models_dir, "shape_predictor_68_face_landmarks.dat")
+            if not os.path.exists(dlib_model_path):
+                download_url = "http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2"
+                download_path = dlib_model_path + ".bz2"
+                self.download_file(download_url, download_path)
+                # Decompresează
+                import bz2
+                with open(dlib_model_path, 'wb') as f_out, bz2.BZ2File(download_path, 'rb') as f_in:
+                    f_out.write(f_in.read())
+            
+            # Importă modulele necesare pentru GPEN
+            from models.gpen.face_enhancement import FaceEnhancement
+            
+            # Inițializează detectorul facial dlib
+            face_detector = dlib.get_frontal_face_detector()
+            landmark_detector = dlib.shape_predictor(dlib_model_path)
+            
+            # Setează device-ul
+            device = torch.device('cuda' if torch.cuda.is_available() and not getattr(self.config, "FORCE_CPU_FOR_FACES", False) else 'cpu')
+            
+            # Inițializează modelul GPEN
+            face_enhancer = FaceEnhancement(
+                model_path=gpen_model_path,
+                size=512,
+                channel_multiplier=2,
+                device=device
+            )
+            
+            # Creează un wrapper pentru interfațarea cu post-procesorul
+            class GPENReal:
+                def __init__(self, face_enhancer, face_detector, landmark_detector, device):
+                    self.face_enhancer = face_enhancer
+                    self.face_detector = face_detector
+                    self.landmark_detector = landmark_detector
+                    self.device = device
+                    logger.info(f"GPEN initialized on {device}")
+                    
+                def process(self, image_np):
+                    try:
+                        logger.info(f"Processing image with GPEN on {self.device}")
+                        
+                        # Convertește la RGB pentru dlib
+                        img_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+                        
+                        # Detectează fețele
+                        faces = self.face_detector(img_rgb)
+                        if len(faces) == 0:
+                            logger.warning("No faces detected for GPEN enhancement")
+                            return {'success': False, 'message': 'No faces detected'}
+                        
+                        # Copie imaginea pentru rezultat
+                        result_img = image_np.copy()
+                        
+                        # Procesează fiecare față
+                        for face in faces:
+                            # Obține landmarks pentru față
+                            shape = self.landmark_detector(img_rgb, face)
+                            landmarks = np.array([[p.x, p.y] for p in shape.parts()])
+                            
+                            # Aplică GPEN enhancement
+                            enhanced_face = self.face_enhancer.process(img_rgb, face, landmarks)
+                            
+                            # Blend face back into image
+                            x1, y1, x2, y2 = face.left(), face.top(), face.right(), face.bottom()
+                            enhanced_face_resized = cv2.resize(enhanced_face, (x2-x1, y2-y1))
+                            
+                            # Creează o mască pentru blending
+                            mask = np.zeros((y2-y1, x2-x1), dtype=np.float32)
+                            mask = cv2.ellipse(mask, ((x2-x1)//2, (y2-y1)//2), ((x2-x1)//2, (y2-y1)//2), 0, 0, 360, 1, -1)
+                            mask = cv2.GaussianBlur(mask, (19, 19), 0)
+                            mask = np.expand_dims(mask, axis=2)
+                            mask = np.repeat(mask, 3, axis=2)
+                            
+                            # Aplicăm enhanced face cu mască
+                            result_img[y1:y2, x1:x2] = result_img[y1:y2, x1:x2] * (1 - mask) + enhanced_face_resized * mask
+                        
+                        return {'success': True, 'result': result_img}
+                        
+                    except Exception as e:
+                        logger.error(f"GPEN processing error: {e}", exc_info=True)
+                        return {'success': False, 'message': str(e)}
+            
+            return GPENReal(face_enhancer, face_detector, landmark_detector, device)
+        
+        except ImportError as e:
+            logger.error(f"Required libraries for GPEN (dlib, etc.) not available: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to load GPEN model: {e}", exc_info=True)
+            return None
+            
+
+
+    def _load_codeformer_model(self) -> Optional[Any]:
+        """Încarcă modelul CodeFormer real pentru restaurarea fețelor."""
+        logger.info("Loading real CodeFormer model...")
+        try:
+            import torch
+            import facexlib
+            from facexlib.detection import RetinaFace
+            from facexlib.parsing import FaceParser
+            
+            # Calea către modelele necesare
+            models_dir = os.path.join(self.config.MODEL_DIR, "codeformer")
+            os.makedirs(models_dir, exist_ok=True)
+            
+            # Descarcă modelul CodeFormer dacă nu există
+            codeformer_model_path = os.path.join(models_dir, "codeformer.pth")
+            if not os.path.exists(codeformer_model_path):
+                download_url = "https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth"
+                self.download_file(download_url, codeformer_model_path)
+            
+            # Setează device-ul
+            device = torch.device('cuda' if torch.cuda.is_available() and not getattr(self.config, "FORCE_CPU_FOR_FACES", False) else 'cpu')
+            
+            # Import classes required for CodeFormer
+            from models.codeformer.codeformer_arch import CodeFormer
+            
+            # Initialize CodeFormer model
+            net_class = CodeFormer
+            net = net_class(dim_embd=512, codebook_size=1024, n_head=8, n_layers=9, 
+                        connect_list=['32', '64', '128', '256']).to(device)
+            
+            # Load pretrained model
+            checkpoint = torch.load(codeformer_model_path, map_location=device)
+            if 'params_ema' in checkpoint:
+                net.load_state_dict(checkpoint['params_ema'])
+            else:
+                net.load_state_dict(checkpoint['params'])
+            net.eval()
+            
+            # Initialize face detector
+            face_detector = RetinaFace(device=device)
+            
+            # Create wrapper class for interfacing with post-processor
+            class CodeFormerReal:
+                def __init__(self, model, face_detector, device):
+                    self.model = model
+                    self.face_detector = face_detector
+                    self.device = device
+                    logger.info(f"CodeFormer initialized on {device}")
+                    
+                def process(self, image_np):
+                    try:
+                        logger.info(f"Processing image with CodeFormer on {self.device}")
+                        
+                        # Convert to RGB for face detection
+                        img_rgb = cv2.cvtColor(image_np, cv2.COLOR_BGR2RGB)
+                        
+                        # Detect faces
+                        face_info = self.face_detector.detect_faces(img_rgb)
+                        if face_info is None or len(face_info) == 0:
+                            logger.warning("No faces detected for CodeFormer enhancement")
+                            return {'success': False, 'message': 'No faces detected'}
+                        
+                        # Copy image for result
+                        result_img = image_np.copy()
+                        
+                        # Process each detected face
+                        for i, face in enumerate(face_info):
+                            # Get bounding box
+                            bbox = face['bbox']
+                            x1, y1, x2, y2 = int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])
+                            
+                            # Ensure valid bbox
+                            h, w = image_np.shape[:2]
+                            x1, y1 = max(0, x1), max(0, y1)
+                            x2, y2 = min(w, x2), min(h, y2)
+                            
+                            # Extract face
+                            face_img = img_rgb[y1:y2, x1:x2]
+                            if face_img.size == 0:
+                                continue
+                            
+                            # Preprocess for model
+                            face_tensor = torch.from_numpy(face_img).permute(2, 0, 1).unsqueeze(0).float() / 255.0
+                            face_tensor = face_tensor.to(self.device)
+                            
+                            # Process with CodeFormer
+                            with torch.no_grad():
+                                output = self.model(face_tensor, w=0.5, adain=True)[0]
+                                
+                            # Post-process output
+                            output = output.squeeze(0).permute(1, 2, 0).cpu().numpy()
+                            output = (output * 255.0).astype(np.uint8)
+                            
+                            # Convert back to BGR
+                            output_bgr = cv2.cvtColor(output, cv2.COLOR_RGB2BGR)
+                            
+                            # Resize to original face size
+                            output_resized = cv2.resize(output_bgr, (x2-x1, y2-y1))
+                            
+                            # Create mask for blending
+                            mask = np.zeros((y2-y1, x2-x1), dtype=np.float32)
+                            center = ((x2-x1)//2, (y2-y1)//2)
+                            radius = min((x2-x1)//2, (y2-y1)//2)
+                            mask = cv2.ellipse(mask, center, (radius, radius), 0, 0, 360, 1, -1)
+                            mask = cv2.GaussianBlur(mask, (19, 19), 0)
+                            mask = np.repeat(mask[:, :, np.newaxis], 3, axis=2)
+                            
+                            # Blend face into original image
+                            result_img[y1:y2, x1:x2] = result_img[y1:y2, x1:x2] * (1 - mask) + output_resized * mask
+                        
+                        return {'success': True, 'result': result_img}
+                        
+                    except Exception as e:
+                        logger.error(f"CodeFormer processing error: {e}", exc_info=True)
+                        return {'success': False, 'message': str(e)}
+            
+            return CodeFormerReal(net, face_detector, device)
+        
+        except ImportError as e:
+            logger.error(f"Required libraries for CodeFormer not available: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to load CodeFormer model: {e}", exc_info=True)
+            return None
+

@@ -35,6 +35,8 @@ class ModelConfig:
         "inference_steps": 30 # FLUX poate necesita mai puțini pași (ex: 8-20 conform documentației)
     }
 
+    
+
 
     # --- HiDream Configuration (pentru backup sau comparație) ---
     HIDREAM_CONFIG = { # Redenumit din BACKUP_CONFIG pentru claritate
@@ -147,4 +149,32 @@ class ModelConfig:
         "background": {"strength": 0.80, "num_inference_steps": 25, "guidance_scale": 7.0},
         "add": {"strength": 0.75, "num_inference_steps": 25, "guidance_scale": 7.0},
         "general": {"strength": 0.75, "num_inference_steps": 20, "guidance_scale": 7.0}
+    }
+
+
+    MODEL_URLS = {
+        'esrgan': 'https://github.com/xinntao/ESRGAN/releases/download/v0.1.0/RRDB_ESRGAN_x4.pth',
+        'gpen': 'https://public-vigen-video.oss-cn-shanghai.aliyuncs.com/robin/models/GPEN-BFR-512.pth',
+        'codeformer': 'https://github.com/sczhou/CodeFormer/releases/download/v0.1.0/codeformer.pth',
+        'dlib_face': 'http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2'
+    }
+
+
+    # Opțional, poți adăuga alte configurații specifice pentru fiecare model
+    ESRGAN_CONFIG = {
+        'scale': 2.0,  # factor de upscale
+        'layers': 23,  # număr de straturi în model
+    }
+
+    GPEN_CONFIG = {
+        'size': 512,  # dimensiunea input pentru model
+        'channel_multiplier': 2  # parametru specific GPEN
+    }
+
+    CODEFORMER_CONFIG = {
+        'dim_embd': 512,
+        'codebook_size': 1024,
+        'n_head': 8,
+        'n_layers': 9,
+        'w': 0.5  # controlează nivelul de editare (0-1)
     }
